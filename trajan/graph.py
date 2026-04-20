@@ -169,8 +169,8 @@ class GraphFromTrajectories:
         """
         displacements = df.compute_displacements()
         connectivity_radius = cls.estimate_connectivity_radius(displacements, sigma_deviation, scaling)
-        position_scale = cls.estimate_max_trajectory_span(df, Dt)
-        return cls(connectivity_radius=connectivity_radius, max_frame_distance=max_frame_distance), position_scale
+        max_trajectory_span = cls.estimate_max_trajectory_span(df, Dt)
+        return cls(connectivity_radius=connectivity_radius, max_frame_distance=max_frame_distance), max_trajectory_span
 
     @staticmethod
     def get_subgraphs(graph: Data) -> list[Data]:
@@ -314,7 +314,7 @@ class GraphFromTrajectories:
         self,
         df: pd.DataFrame,
         target_column: Optional[str] = None,
-        split_tracks: bool = False,
+        split_tracks: bool = True,
     ) -> list[Data]:
         """Build a list of PyG Data objects from a TracksDataFrame.
 
