@@ -1,0 +1,46 @@
+[project]
+name = "trajan"
+version = "0.1.0"
+description = "Particle type classification from tracking data using graph neural networks"
+requires-python = ">=3.10"
+
+dependencies = [
+    # Core torch stack — versions must be mutually compatible on macOS x86_64
+    "torch==2.2.2",
+    "torchvision==0.17.2",
+    "torch-geometric==2.7.0",
+    "torchmetrics==1.8.2",
+    "lightning==2.6.1",
+
+    # Scientific computing
+    "numpy==1.26.4",
+    "scipy==1.14.1",
+    "pandas==2.3.3",
+    "scikit-learn==1.8.0",
+    "trackpy==0.6.4",
+
+    # Graph and vision
+    "networkx==3.6.1",
+    "opencv-python==4.11.0.86",
+
+    # Visualisation
+    "matplotlib==3.10.1",
+
+    # Other
+    "deeplay",
+    "deeptrack",
+    "optuna==4.8.0",
+    "tqdm",
+]
+
+[project.optional-dependencies]
+notebooks = [
+    "ipykernel==6.29.5",
+    "ipywidgets==8.1.6",
+    "jupyter-client==8.8.0",
+    "joblib==1.5.3",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["trajan*"]
