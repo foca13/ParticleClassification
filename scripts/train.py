@@ -1,223 +1,237 @@
+import argparse
+import shutil
+from pathlib import Path
+
 import deeplay as dl
+import matplotlib.pyplot as plt
 import pandas as pd
 import torch
 import torch.nn as nn
 import yaml
-from sklearn.metrics import (ConfusionMatrixDisplay, classification_report,
-                             confusion_matrix)
+from lightning.pytorch.callbacks import ModelCheckpoint
+from lightning.pytorch.loggers import CSVLogger
+from sklearn.metrics import (
+    ConfusionMatrixDisplay,
+    classification_report,
+    confusion_matrix,
+)
 from torch_geometric.loader import DataLoader
 from torchvision.transforms import Compose
 
+import lightning as L
 from trajan.data import TracksDataFrame
 from trajan.dataset import GraphDataset
 from trajan.graph import GraphFromTrajectories
 from trajan.transforms import RandomFlip, RandomRotation
-from lightning.pytorch.callbacks import ModelCheckpoint
-from lightning.pytorch.loggers import CSVLogger
 
-Dt = 50
-max_frame_distance = 3
 
-#data = pd.read_csv("data/simulated/fbm_dataset.csv")
-#data = particle_tracking.TracksDataFrame(data)
+def build_run_name(cfg: dict) -> str:
+    m = cfg["model"]
+    g = cfg["graph"]
+    t = cfg["training"]
+    return (
+        f"dim{m['encoder_dimension']}"
+        f"_blocks{m['num_blocks']}"
+        f"_Dt{g['Dt']}"
+        f"_lr{t['lr']}"
+        f"_wd{t['weight_decay']}"
+    )
 
-data = pd.read_csv("data/cytoplasmic_data/tracks.csv", skiprows=1)
-data = TracksDataFrame(data, frame_rate=10)
 
-data_description = data.describe_tracks()
-display_labels = data_description['particle_types']
+def run(cfg: dict, trial=None) -> float:
+    """Run a full training pipeline from a config dictionary.
 
-train_data, val_data = data.split_train_test()
+    Parameters
+    ----------
+    cfg : dict
+        Parsed YAML config dictionary.
+    trial : optuna.Trial, optional
+        If provided, enables Optuna pruning via a Lightning callback.
 
-graph_builder, position_scale = GraphFromTrajectories.from_tracks(train_data, Dt, max_frame_distance)
+    Returns
+    -------
+    float
+        Best validation loss achieved during training.
+    """
+    L.seed_everything(cfg["seed"])
 
-train_graphs = graph_builder(train_data, target_column="type", split_tracks=True)
-val_graphs = graph_builder(val_data, target_column="type", split_tracks=True)
+    run_name = build_run_name(cfg)
+    output_dir = Path("outputs") / run_name
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-train_dataset_size = 2 * len(train_graphs)
-val_dataset_size = 2 * len(val_graphs)
+    # Save config to output directory for reproducibility
+    shutil.copy(args.config, output_dir / "config.yaml")
 
-batch_size = 16
-sample_balanced = True
+    # -------------------------------------------------------------------------
+    # Data
+    # -------------------------------------------------------------------------
+    data = pd.read_csv(cfg["data"]["path"], skiprows=1)
+    data = TracksDataFrame(data, frame_rate=cfg["data"]["frame_rate"])
 
-transform = Compose([
-        RandomRotation(),
-        RandomFlip(),
-        ])
+    data_description = data.describe_tracks()
+    display_labels = data_description["particle_types"]
 
-train_dataset = GraphDataset(
-    train_graphs,
-    Dt,
-    train_dataset_size,
-    position_scale=position_scale,
-    transform=transform,
-    target="global",
-    sample_balanced=True,
-)
-val_dataset = GraphDataset(
-    val_graphs,
-    Dt,
-    train_dataset_size,
-    position_scale=position_scale,
-    transform=transform,
-    target="global"
-)
+    train_data, val_data = data.split_train_test(
+        test_size=cfg["data"]["test_size"],
+        seed=cfg["seed"],
+    )
 
-train_loader = DataLoader(
-    train_dataset,
-    batch_size=batch_size,
-    shuffle=True,
-    drop_last=True,
-    num_workers=0,
-)
-val_loader = DataLoader(
-    val_dataset,
-    batch_size=256,
-    drop_last=True,
-    num_workers=0,
-)
+    # -------------------------------------------------------------------------
+    # Graphs
+    # -------------------------------------------------------------------------
+    Dt = cfg["graph"]["Dt"]
+    max_frame_distance = cfg["graph"]["max_frame_distance"]
 
-lr = 5e-4
-wd = 1e-5
-encoder_dimension = 96
-num_blocks = 3
-batch_size = 16
-num_epochs = 10
-#class_weights = torch.tensor([1.89, 5.56, 3.45])
+    graph_builder, position_scale = GraphFromTrajectories.from_tracks(
+        train_data, Dt, max_frame_distance
+    )
 
-magik = dl.GraphToGlobalMPM(
-    [encoder_dimension] * num_blocks,
-    out_activation=nn.Softmax(dim=1),
-    out_features=3,
-).create()
+    train_graphs = graph_builder(train_data, target_column="type", split_tracks=True)
+    val_graphs = graph_builder(val_data, target_column="type", split_tracks=True)
 
-classifier_magik = dl.CategoricalClassifier(
-    model=magik,
-    optimizer=dl.Adam(lr=lr, weight_decay=wd),
-    loss=nn.CrossEntropyLoss(),
-    num_classes=3,
-).build()
+    # -------------------------------------------------------------------------
+    # Datasets
+    # -------------------------------------------------------------------------
+    transform = Compose([RandomRotation(), RandomFlip()])
 
-trainer_magik = dl.Trainer(max_epochs=num_epochs, accelerator="auto")
+    train_dataset_size = cfg["training"]["dataset_size_multiplier"] * len(train_graphs)
+    val_dataset_size = cfg["training"]["dataset_size_multiplier"] * len(val_graphs)
 
-trainer_magik.fit(classifier_magik, train_loader, val_loader)
+    train_dataset = GraphDataset(
+        train_graphs,
+        Dt,
+        train_dataset_size,
+        position_scale=position_scale,
+        transform=transform,
+        target="global",
+        sample_balanced=cfg["training"]["sample_balanced"],
+    )
+    val_dataset = GraphDataset(
+        val_graphs,
+        Dt,
+        val_dataset_size,
+        position_scale=position_scale,
+        target="global",
+    )
 
-trainer_magik.history.plot()
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=cfg["training"]["batch_size"],
+        shuffle=True,
+        drop_last=True,
+        num_workers=0,
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=cfg["training"]["val_batch_size"],
+        drop_last=True,
+        num_workers=0,
+    )
 
-truth, preds = [], []
+    # -------------------------------------------------------------------------
+    # Model
+    # -------------------------------------------------------------------------
+    num_classes = cfg["model"]["num_classes"]
+    encoder_dimension = cfg["model"]["encoder_dimension"]
+    num_blocks = cfg["model"]["num_blocks"]
 
-for batch in val_loader:
-    y_true = batch.y
-    y_pred = torch.argmax(classifier_magik(batch), dim=1)
-    truth.append(y_true)
-    preds.append(y_pred)
+    magik = dl.GraphToGlobalMPM(
+        [encoder_dimension] * num_blocks,
+        out_activation=nn.Softmax(dim=1),
+        out_features=num_classes,
+    ).create()
 
-truth, preds = torch.concat(truth).numpy(), torch.concat(preds).numpy()
+    model = dl.CategoricalClassifier(
+        model=magik,
+        optimizer=dl.Adam(
+            lr=cfg["training"]["lr"],
+            weight_decay=cfg["training"]["weight_decay"],
+        ),
+        loss=nn.CrossEntropyLoss(),
+        num_classes=num_classes,
+    ).build()
 
-cm = confusion_matrix(truth, preds)
+    # -------------------------------------------------------------------------
+    # Callbacks and logger
+    # -------------------------------------------------------------------------
+    checkpoint_cb = ModelCheckpoint(
+        dirpath=output_dir,
+        filename="best",
+        monitor="val_loss",
+        mode="min",
+        save_top_k=1,
+    )
 
-disp = ConfusionMatrixDisplay(confusion_matrix=cm,
-                            display_labels=display_labels)
+    callbacks = [checkpoint_cb]
 
-disp.plot()
+    if trial is not None:
+        from optuna.integration import PyTorchLightningPruningCallback
+        callbacks.append(PyTorchLightningPruningCallback(trial, monitor="val_loss"))
 
-report = classification_report(truth, preds, target_names=display_labels, output_dict=True)
-report_df = pd.DataFrame(report).T.round(2)
-report_df.to_csv("classification_report_fbm.csv", index=False)
-print(report_df.to_string())
+    logger = CSVLogger(save_dir="outputs", name=run_name)
 
-"""
-hyperparams = {
-    'connectivity_radius': connectivity_radius,
-    'max_frame_distance': max_frame_distance,
-    'Dt': Dt,
-    'lr': lr,
-    'wd': wd,
-    'encoder_dimension': encoder_dimension,
-    'num_blocks': num_blocks,
-    'apply_transform': apply_transform,
-    'batch_size': batch_size,
-    'num_epochs': num_epochs,
-    'dataset_size': int(dataset_size),
-    'sample_balanced': sample_balanced,
-}
+    # -------------------------------------------------------------------------
+    # Training
+    # -------------------------------------------------------------------------
+    trainer = dl.Trainer(
+        max_epochs=cfg["training"]["num_epochs"],
+        accelerator="auto",
+        callbacks=callbacks,
+        logger=logger,
+        enable_progress_bar=trial is None,
+    )
 
-with open('experiment_fbm.json', 'w') as f:
-    json.dump(hyperparams, f, indent=4)
+    trainer.fit(model, train_loader, val_loader)
 
-print('end')
-"""
-"""for Dt in [40]:
-    def objective(trial):
-        connectivity_radius = trial.suggest_categorical("connectivity_radius", [0.02, 0.03, 0.04, 0.05])
-        max_frame_distance = trial.suggest_int("max_frame_distance", 2, 5)
-        lr = trial.suggest_float("lr", 1e-5, 1e-2, log=True)
-        wd = trial.suggest_float("wd", 1e-6, 1e-3, log=True)
-        encoder_dimension = trial.suggest_categorical("encoder_dimension", [32, 64, 96])
-        num_blocks = trial.suggest_categorical("num_blocs", [2, 3, 4])
+    best_val_loss = checkpoint_cb.best_model_score.item()
 
-        graph_constructor = utils_magik.GraphFromTrajectories(
-            connectivity_radius=connectivity_radius,
-            max_frame_distance=max_frame_distance,
+    # -------------------------------------------------------------------------
+    # Evaluation (skipped during HPO)
+    # -------------------------------------------------------------------------
+    if trial is None:
+        best_model = dl.CategoricalClassifier.load_from_checkpoint(
+            checkpoint_cb.best_model_path
         )
+        best_model.eval()
 
-        train_graph = graph_constructor(df=train_data, target="type", split_particles=True)
-        val_graph = graph_constructor(df=val_data, target="type", split_particles=True)
+        truth, preds = [], []
+        with torch.no_grad():
+            for batch in val_loader:
+                y_pred = torch.argmax(best_model(batch), dim=1)
+                truth.append(batch.y)
+                preds.append(y_pred)
 
-        train_dataset = utils_magik.GraphDataset(
-            train_graph,
-            dataset_size=dataset_size,
-            Dt=Dt,
-            target='global',
+        truth = torch.concat(truth).numpy()
+        preds = torch.concat(preds).numpy()
+
+        # Confusion matrix
+        cm = confusion_matrix(truth, preds)
+        cm_df = pd.DataFrame(cm, index=display_labels, columns=display_labels)
+        cm_df.to_csv(output_dir / "confusion_matrix.csv")
+
+        fig, ax = plt.subplots()
+        ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=display_labels).plot(ax=ax)
+        fig.savefig(output_dir / "confusion_matrix.png", bbox_inches="tight", dpi=150)
+        plt.close(fig)
+
+        # Classification report
+        report = classification_report(
+            truth, preds, target_names=display_labels, output_dict=True
         )
-        val_dataset = utils_magik.GraphDataset(
-            val_graph,
-            dataset_size=dataset_size//4,
-            Dt=Dt,
-            target='global',
-        )
+        report_df = pd.DataFrame(report).T.round(2)
+        report_df.to_csv(output_dir / "classification_report.csv")
 
-        train_loader = DataLoader(
-            train_dataset,
-            batch_size=16,
-            shuffle=True,
-            drop_last=True,
-            num_workers=0,
-        )
-        val_loader = DataLoader(
-            val_dataset,
-            batch_size=256,
-            drop_last=True,
-            num_workers=0,
-        )
+        print(report_df.to_string())
 
-        magik = dl.GraphToGlobalMPM(
-            [encoder_dimension,] * num_blocks,
-            out_activation=torch.nn.Softmax(dim=1),
-            out_features=3,
-        ).create()
+    return best_val_loss
 
-        classifier_magik = dl.CategoricalClassifier(
-            model=magik,
-            optimizer=dl.Adam(lr=lr, weight_decay=wd),
-            loss=nn.CrossEntropyLoss(),
-            num_classes=3,
-        ).build()
 
-        trainer_magik = dl.Trainer(max_epochs=8, accelerator="auto")
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", default="configs/default.yaml")
+    args = parser.parse_args()
 
-        trainer_magik.fit(classifier_magik, train_loader, val_loader)
+    with open(args.config) as f:
+        cfg = yaml.safe_load(f)
 
-        if trial.number % 5 == 0:
-            time.sleep(200)
-        return trainer_magik.callback_metrics["val_loss"].item()
-
-    study = optuna.create_study(
-        direction="minimize",
-        pruner=optuna.pruners.MedianPruner(),
-        )
-    study.optimize(objective, n_trials=40)
-
-    with open(f"results/Magik/traj_len_{Dt}_best_params.json", "w") as f:
-        json.dump(study.best_params, f, indent=4)
-"""
+    run(cfg)
