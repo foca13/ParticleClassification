@@ -151,7 +151,7 @@ class GraphDataset(torch.utils.data.Dataset):
         node_mask = torch.tensor([])
         while node_mask.sum() < 2:
             max_frame = frames.max()
-            start_frame = np.random.choice(frames[frames >= (max_frame - self.Dt)].numpy())
+            start_frame = np.random.choice(frames[frames <= (max_frame - self.Dt + 1)].numpy())
             end_frame = start_frame + self.Dt
             node_mask = (frames >= start_frame) & (frames < end_frame)
 

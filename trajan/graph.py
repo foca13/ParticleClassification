@@ -113,7 +113,7 @@ class GraphFromTrajectories:
         ----------
         df : TracksDataFrame
             Tracking data containing at least the columns
-            ["set", "centroid-0", "centroid-1"].
+            ["set", "x", "y"].
         Dt : int
             Length of the time window in frames.
 
@@ -126,7 +126,7 @@ class GraphFromTrajectories:
         for video in df["set"].unique():
             df_video = df[df["set"] == video]
             for particle in df_video["label"].unique():
-                coords = df_video[df_video["label"] == particle][["centroid-0", "centroid-1"]].to_numpy()
+                coords = df_video[df_video["label"] == particle][["x", "y"]].to_numpy()
                 for i in range(len(coords) - Dt):
                     span = np.ptp(coords[i:i + Dt], axis=0).max()
                     if span > max_span:
@@ -327,7 +327,7 @@ class GraphFromTrajectories:
         ----------
         df : pd.DataFrame
             Tracking data containing at least the columns
-            ["set", "frame", "centroid-0", "centroid-1", "label"].
+            ["set", "frame", "x", "y", "label"].
         target_column : str, optional
             Column to use as a graph-level classification target. Its
             values are encoded as integer codes. Default is None.
@@ -359,7 +359,7 @@ class GraphFromTrajectories:
             df_video = df[df["set"] == current_video]
             df_video = df_video.sort_values(by=["frame"]).reset_index(drop=True)
 
-            positions = df_video[["centroid-0", "centroid-1"]].to_numpy()
+            positions = df_video[["x", "y"]].to_numpy()
             node_labels = df_video["label"].to_numpy()
             frames = df_video["frame"].to_numpy()
 

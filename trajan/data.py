@@ -1,6 +1,6 @@
 import json
 import warnings
-from typing import Dict, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -35,10 +35,10 @@ class TracksDataFrame(pd.DataFrame):
     label : int
         Particle identifier. Detections sharing a label belong to the
         same trajectory.
-    centroid-0 : float
-        Row (y) coordinate of the detection centroid.
-    centroid-1 : float
-        Column (x) coordinate of the detection centroid.
+    x : float
+        X coordinate of the detection centroid.
+    y : float
+        Y coordinate of the detection centroid.
 
     Methods
     -------
@@ -59,14 +59,37 @@ class TracksDataFrame(pd.DataFrame):
     >>> displacements = train.compute_displacements()
     """
 
-    def __init__(self, *args, frame_rate = None, **kwargs) -> None:
+    _metadata = ["frame_rate"]
+
+    def __init__(self, *args, frame_rate=None, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.frame_rate = frame_rate
 
-    # This ensures operations that return a DataFrame return YOUR class instead
     @property
     def _constructor(self) -> "TracksDataFrame":
         return TracksDataFrame
+
+    @classmethod
+    def concat(cls, dfs: List["TracksDataFrame"], frame_rate: Optional[float] = None) -> "TracksDataFrame":
+        """Concatenate multiple TracksDataFrame objects into one.
+
+        Parameters
+        ----------
+        dfs : List[TracksDataFrame]
+            DataFrames to concatenate.
+        frame_rate : float, optional
+            Frame rate for the result. Defaults to the first df's frame_rate.
+        """
+        if frame_rate is None and dfs:
+            frame_rate = dfs[0].frame_rate
+        adjusted = []
+        offset = 0
+        for df in dfs:
+            copy = df.copy()
+            copy["set"] = copy["set"] + offset
+            offset += int(df["set"].max()) + 1
+            adjusted.append(copy)
+        return cls(pd.concat(adjusted, ignore_index=True), frame_rate=frame_rate)
 
     def describe_tracks(self) -> Dict:
         particle_types = self["type"].unique().tolist()
@@ -149,7 +172,7 @@ class TracksDataFrame(pd.DataFrame):
             for particle in video_data["label"].unique():
                 particle_selection = video_data[video_data["label"] == particle]
                 frame_gaps = np.where(np.diff(particle_selection["frame"]) > 1)[0]
-                coords = particle_selection[["centroid-0", "centroid-1"]].to_numpy()
+                coords = particle_selection[["x", "y"]].to_numpy()
                 for section in np.split(coords, frame_gaps + 1):
                     step_displacement = np.linalg.norm(np.diff(section, axis=0), axis=1)
                     displacements.append(step_displacement)

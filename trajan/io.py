@@ -1,9 +1,12 @@
 import pathlib
 import xml.etree.ElementTree as ET
-from typing import List, Tuple
+from typing import List, Optional, Tuple, Union
 
+import pandas as pd
 import numpy as np
 import torch
+
+from .data import TracksDataFrame
 
 
 def load_xml_files(dir_path: str) -> List[ET.ElementTree]:
@@ -116,6 +119,61 @@ def merge_tracks(track_recordings: List[List[np.ndarray]]) -> List[np.ndarray]:
         A flat list of all trajectories across all recordings.
     """
     return sum(track_recordings, [])
+
+
+def to_tracks_dataframe(
+    track_recordings: List[List[np.ndarray]],
+    frame_rate: Optional[float] = None,
+    particle_type: Optional[Union[str, List[str]]] = None,
+) -> TracksDataFrame:
+    """Convert parsed XML recordings into a TracksDataFrame.
+
+    Parameters
+    ----------
+    track_recordings : List[List[np.ndarray]]
+        A list of recordings as returned by parse_particle_xml_files.
+        Each recording is a list of trajectories (one per track), each
+        being an array of (t, x, y) tuples.
+    frame_rate : float, optional
+        Frame rate of the recordings in frames per second. Default is None.
+    particle_type : str or list of str, optional
+        Particle type label(s) for the "type" column. If a single string,
+        all rows share that type. If a list, its length must match the number
+        of recordings and each recording's rows get the corresponding type.
+        If not provided, all rows are labelled "unspecified".
+
+    Returns
+    -------
+    TracksDataFrame
+        A TracksDataFrame with columns set, frame, label, type, x, y.
+        Labels restart from 0 for each recording.
+    """
+    if particle_type is None:
+        type_per_set = ["unspecified"] * len(track_recordings)
+    elif isinstance(particle_type, str):
+        type_per_set = [particle_type] * len(track_recordings)
+    else:
+        if len(particle_type) != len(track_recordings):
+            raise ValueError(
+                f"particle_type list length ({len(particle_type)}) must match "
+                f"number of recordings ({len(track_recordings)})"
+            )
+        type_per_set = list(particle_type)
+
+    rows = []
+    for set_idx, recording in enumerate(track_recordings):
+        for label_idx, particle in enumerate(recording):
+            for t, x, y in particle:
+                rows.append({
+                    "x": x,
+                    "y": y,
+                    "frame": t,
+                    "label": label_idx,
+                    "set": set_idx,
+                    "type": type_per_set[set_idx],
+                })
+
+    return TracksDataFrame(pd.DataFrame(rows), frame_rate=frame_rate)
 
 
 def split_trajectories(
