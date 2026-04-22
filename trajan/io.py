@@ -105,22 +105,6 @@ def parse_particle_xml_files(
     return tracks
 
 
-def merge_tracks(track_recordings: List[List[np.ndarray]]) -> List[np.ndarray]:
-    """Flatten a list of recordings into a single list of trajectories.
-
-    Parameters
-    ----------
-    track_recordings : List[List[np.ndarray]]
-        A list of recordings, each being a list of particle trajectories.
-
-    Returns
-    -------
-    List[np.ndarray]
-        A flat list of all trajectories across all recordings.
-    """
-    return sum(track_recordings, [])
-
-
 def to_tracks_dataframe(
     track_recordings: List[List[np.ndarray]],
     frame_rate: Optional[float] = None,
@@ -174,44 +158,3 @@ def to_tracks_dataframe(
                 })
 
     return TracksDataFrame(pd.DataFrame(rows), frame_rate=frame_rate)
-
-
-def split_trajectories(
-    tracks: List[np.ndarray],
-    size: int = 20,
-    label: int = 0,
-) -> List[Tuple[torch.Tensor, int]]:
-    """Split and normalize trajectories into fixed-length segments.
-
-    Each trajectory is divided into non-overlapping segments of exactly
-    `size` detections. Segments shorter than `size` are discarded.
-    Each segment is origin-centered (first detection subtracted) and
-    the temporal axis is normalized by `size`.
-
-    Parameters
-    ----------
-    tracks : List[np.ndarray]
-        A list of trajectories, each an array of shape (T, 3) with
-        columns (t, x, y).
-    size : int, optional
-        The number of detections per segment. Default is 20.
-    label : int, optional
-        The class label to assign to all segments, used when building
-        a labelled dataset from multiple particle types. Default is 0.
-
-    Returns
-    -------
-    List[Tuple[torch.Tensor, int]]
-        A list of (segment, label) pairs. Each segment is a float32
-        tensor of shape (3, size) with rows (t, x, y).
-    """
-    particles = []
-    for particle in tracks:
-        split_idx = (np.arange(int(len(particle) / size)) + 1) * size
-        for traj in np.array_split(particle, split_idx):
-            if len(traj) < size:
-                continue
-            traj -= traj[0]
-            traj[:, 0] /= size
-            particles.append((torch.tensor(traj, dtype=torch.float32).T, label))
-    return particles
