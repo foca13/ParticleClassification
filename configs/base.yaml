@@ -1,0 +1,25 @@
+# configs/default.yaml
+seed: 42
+
+data:
+  path: "data/cytoplasmic_data/tracks.csv"
+  frame_rate: 10
+  test_size: 0.25
+
+graph:
+  max_frame_distance: 3
+  Dt: 50
+
+model:
+  encoder_dimension: 96
+  num_blocks: 3
+  num_classes: 3
+
+training:
+  lr: 5e-4
+  weight_decay: 1e-5
+  batch_size: 16
+  val_batch_size: 256
+  num_epochs: 10
+  sample_balanced: true
+  dataset_size_multiplier: 2
