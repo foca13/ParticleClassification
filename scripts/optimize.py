@@ -27,7 +27,7 @@ def objective(trial, base_cfg: dict) -> float:
     cfg["training"]["lr"] = trial.suggest_float("lr", 1e-5, 1e-3, log=True)
     cfg["training"]["weight_decay"] = trial.suggest_float("weight_decay", 1e-6, 1e-4, log=True)
 
-    best_val_loss, _ = run(cfg, trial=trial)
+    best_val_loss, *_ = run(cfg, trial=trial)
     return best_val_loss
 
 

@@ -21,13 +21,19 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import deeplay as dl
+import matplotlib.pyplot as plt
 import pandas as pd
 import torch
 import yaml
 from torch_geometric.data import Batch
 
-from scripts.train import run
+from scripts.train import (
+    run,
+    evaluate,
+    plot_confusion_matrix,
+    plot_classification_report,
+    save_classification_report,
+)
 from trajan.data import TracksDataFrame
 from trajan.graph import GraphFromTrajectories
 
@@ -133,14 +139,25 @@ def main():
         cfg["data"]["val_tracks"] = split["val_tracks"]
         cfg["seed"] = split["seed"]
 
-        best_val_loss, run_dir = run(cfg)
+        best_val_loss, run_dir, best_model, val_loader, display_labels = run(cfg)
+
+        report_df, cm_df = evaluate(best_model, val_loader, display_labels)
+        print(report_df.to_string())
+
+        fig = plot_confusion_matrix(cm_df, display_labels)
+        fig.savefig(run_dir / "confusion_matrix.png", bbox_inches="tight", dpi=150)
+        plt.close(fig)
+        cm_df.to_csv(run_dir / "confusion_matrix.csv")
+
+        fig = plot_classification_report(report_df)
+        fig.savefig(run_dir / "classification_report.png", bbox_inches="tight", dpi=150)
+        plt.close(fig)
+        save_classification_report(report_df, run_dir / "classification_report.csv")
 
         train_data, val_data = data.split_train_test_manual(split["val_tracks"])
         graph_builder, position_scale = GraphFromTrajectories.from_tracks(
             train_data, cfg["graph"]["Dt"], cfg["graph"]["max_frame_distance"]
         )
-
-        best_model = dl.CategoricalClassifier.load_from_checkpoint(run_dir / "best.ckpt")
 
         records = _evaluate(best_model, val_data, graph_builder, position_scale, type_to_code)
         for r in records:

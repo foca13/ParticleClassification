@@ -4,6 +4,7 @@ from pathlib import Path
 
 import deeplay as dl
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
@@ -35,19 +36,64 @@ def build_run_id() -> str:
     return datetime.now().strftime("%Y%m%d_%H%M%S")
 
 
-def _store_classification_report(report_df: pd.DataFrame, run_dir: Path):
+def evaluate(model, val_loader, display_labels):
+    """Run inference and return classification metrics.
+
+    Parameters
+    ----------
+    model : dl.CategoricalClassifier
+        Trained model to evaluate.
+    val_loader : DataLoader
+        Validation data loader.
+    display_labels : list[str]
+        Class names in the order used by the model's output logits.
+
+    Returns
+    -------
+    tuple[pd.DataFrame, pd.DataFrame]
+        report_df : classification report with precision/recall/f1 per class.
+        cm_df : confusion matrix with class names as index and columns.
+    """
+    model.eval()
+    truth, preds = [], []
+    with torch.no_grad():
+        for batch in val_loader:
+            y_pred = torch.argmax(model(batch), dim=1)
+            truth.append(batch.y)
+            preds.append(y_pred)
+
+    truth = torch.concat(truth).numpy()
+    preds = torch.concat(preds).numpy()
+
+    report = classification_report(truth, preds, target_names=display_labels, output_dict=True)
+    report_df = pd.DataFrame(report).T.round(2)
+
+    cm = confusion_matrix(truth, preds)
+    cm_df = pd.DataFrame(cm, index=display_labels, columns=display_labels)
+
+    return report_df, cm_df
+
+
+def plot_confusion_matrix(cm_df: pd.DataFrame, display_labels: list) -> plt.Figure:
+    """Plot a confusion matrix and return the figure."""
+    fig, ax = plt.subplots()
+    ConfusionMatrixDisplay(
+        confusion_matrix=cm_df.values, display_labels=display_labels
+    ).plot(ax=ax)
+    return fig
+
+
+def plot_classification_report(report_df: pd.DataFrame) -> plt.Figure:
+    """Plot a classification report table and return the figure."""
     accuracy = report_df.loc["accuracy", "f1-score"]
-    report_df = report_df.drop("accuracy")
-    report_df.to_csv(run_dir / "classification_report.csv")
-    with open(run_dir / "classification_report.csv", "a") as f:
-        f.write(f"\naccuracy,{accuracy:.2f}")
+    plot_df = report_df.drop("accuracy")
 
     fig, ax = plt.subplots(figsize=(8, 2.5))
     ax.axis("off")
     table = ax.table(
-        cellText=report_df.values,
-        rowLabels=report_df.index,
-        colLabels=report_df.columns,
+        cellText=plot_df.values,
+        rowLabels=plot_df.index,
+        colLabels=plot_df.columns,
         loc="center",
     )
     table.auto_set_font_size(False)
@@ -60,12 +106,19 @@ def _store_classification_report(report_df: pd.DataFrame, run_dir: Path):
         va="bottom",
         ha="left",
     )
-    fig.savefig(run_dir / "classification_report.png", bbox_inches="tight", dpi=150)
-    plt.close(fig)
+    return fig
 
 
-def run(cfg: dict, trial=None) -> float:
-    """Run a full training pipeline from a config dictionary.
+def save_classification_report(report_df: pd.DataFrame, path: Path) -> None:
+    """Save a classification report to CSV, appending the accuracy row cleanly."""
+    accuracy = report_df.loc["accuracy", "f1-score"]
+    report_df.drop("accuracy").to_csv(path)
+    with open(path, "a") as f:
+        f.write(f"\naccuracy,{accuracy:.2f}")
+
+
+def run(cfg: dict, trial=None):
+    """Train a model from a config dictionary.
 
     Parameters
     ----------
@@ -76,8 +129,8 @@ def run(cfg: dict, trial=None) -> float:
 
     Returns
     -------
-    float
-        Best validation loss achieved during training.
+    tuple[float, Path, dl.CategoricalClassifier, DataLoader, list[str]]
+        best_val_loss, run_dir, best_model, val_loader, display_labels.
     """
     L.seed_everything(cfg["seed"])
 
@@ -224,50 +277,18 @@ def run(cfg: dict, trial=None) -> float:
 
     trainer.fit(model, train_loader, val_loader)
 
-    fig, ax = trainer.history.plot()
+    fig, _ = trainer.history.plot()
     fig.savefig(run_dir / "training_curves.png")
     plt.close(fig)
 
     best_val_loss = checkpoint_cb.best_model_score.item() if checkpoint_cb.best_model_score is not None else float("inf")
 
-    # -------------------------------------------------------------------------
-    # Evaluation (skipped during HPO)
-    # -------------------------------------------------------------------------
-    if trial is None:
-        best_model = dl.CategoricalClassifier.load_from_checkpoint(
-            checkpoint_cb.best_model_path
-        )
-        best_model.eval()
+    if checkpoint_cb.best_model_path:
+        best_model = dl.CategoricalClassifier.load_from_checkpoint(checkpoint_cb.best_model_path)
+    else:
+        best_model = model
 
-        truth, preds = [], []
-        with torch.no_grad():
-            for batch in val_loader:
-                y_pred = torch.argmax(best_model(batch), dim=1)
-                truth.append(batch.y)
-                preds.append(y_pred)
-
-        truth = torch.concat(truth).numpy()
-        preds = torch.concat(preds).numpy()
-
-        # Confusion matrix
-        cm = confusion_matrix(truth, preds)
-        cm_df = pd.DataFrame(cm, index=display_labels, columns=display_labels)
-        cm_df.to_csv(run_dir / "confusion_matrix.csv")
-
-        fig, ax = plt.subplots()
-        ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=display_labels).plot(ax=ax)
-        fig.savefig(run_dir / "confusion_matrix.png", bbox_inches="tight", dpi=150)
-        plt.close(fig)
-
-        # Classification report
-        report = classification_report(
-            truth, preds, target_names=display_labels, output_dict=True
-        )
-        report_df = pd.DataFrame(report).T.round(2)
-        print(report_df.to_string())
-        _store_classification_report(report_df, run_dir)
-
-    return best_val_loss, run_dir
+    return best_val_loss, run_dir, best_model, val_loader, display_labels
 
 
 if __name__ == "__main__":
@@ -278,4 +299,17 @@ if __name__ == "__main__":
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
 
-    run(cfg)
+    best_val_loss, run_dir, best_model, val_loader, display_labels = run(cfg)
+
+    report_df, cm_df = evaluate(best_model, val_loader, display_labels)
+    print(report_df.to_string())
+
+    fig = plot_confusion_matrix(cm_df, display_labels)
+    fig.savefig(run_dir / "confusion_matrix.png", bbox_inches="tight", dpi=150)
+    plt.close(fig)
+    cm_df.to_csv(run_dir / "confusion_matrix.csv")
+
+    fig = plot_classification_report(report_df)
+    fig.savefig(run_dir / "classification_report.png", bbox_inches="tight", dpi=150)
+    plt.close(fig)
+    save_classification_report(report_df, run_dir / "classification_report.csv")
