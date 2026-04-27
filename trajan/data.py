@@ -147,10 +147,46 @@ class TracksDataFrame(pd.DataFrame):
                 test_data.append(tracks[tracks["label"].isin(test_ids)])
                 train_data.append(tracks[~tracks["label"].isin(test_ids)])
 
-        train_data = TracksDataFrame(pd.concat(train_data, ignore_index=True))
-        test_data = TracksDataFrame(pd.concat(test_data, ignore_index=True))
+        train_data = TracksDataFrame(pd.concat(train_data, ignore_index=True), frame_rate=self.frame_rate)
+        test_data = TracksDataFrame(pd.concat(test_data, ignore_index=True), frame_rate=self.frame_rate)
 
         return train_data, test_data
+
+    def split_train_test_manual(
+        self, val_sets: Dict[str, List[int]]
+    ) -> Tuple["TracksDataFrame", "TracksDataFrame"]:
+        """Split data into train and validation sets using explicit recording indices.
+
+        Parameters
+        ----------
+        val_sets : Dict[str, List[int]]
+            Mapping from particle type to a list of set (recording) indices
+            to hold out for validation. Types absent from the dict are
+            assigned entirely to the training set with a warning.
+
+        Returns
+        -------
+        Tuple[TracksDataFrame, TracksDataFrame]
+            Train and validation sets as TracksDataFrame instances.
+        """
+        train_data, val_data = [], []
+
+        for particle_type in self["type"].unique():
+            selected_type = self[self["type"] == particle_type]
+            val_set_ids = val_sets.get(particle_type, [])
+            if not val_set_ids:
+                warnings.warn(
+                    f"No validation sets specified for particle type '{particle_type}', "
+                    "all its recordings go to train."
+                )
+            val_mask = selected_type["set"].isin(val_set_ids)
+            val_data.append(selected_type[val_mask])
+            train_data.append(selected_type[~val_mask])
+
+        train_data = TracksDataFrame(pd.concat(train_data, ignore_index=True), frame_rate=self.frame_rate)
+        val_data = TracksDataFrame(pd.concat(val_data, ignore_index=True), frame_rate=self.frame_rate)
+
+        return train_data, val_data
 
     def compute_displacements(self) -> np.ndarray:
         """Compute per-step displacement magnitudes across all trajectories.
