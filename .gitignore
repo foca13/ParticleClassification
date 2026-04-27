@@ -9,7 +9,7 @@ __pycache__/
 *.egg-info/
 
 # Jupyter and Lightning
-notebooks/lightning_logs/
+lightning_logs/
 
 # OS and editor
 .DS_Store

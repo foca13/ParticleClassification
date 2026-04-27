@@ -32,8 +32,8 @@ class GraphFromTrajectories:
     -------
     estimate_connectivity_radius(displacements, sigma_deviation, scaling)
         Estimate a connectivity radius from observed displacements.
-    estimate_position_scale(df, Dt)
-        Estimate a position normalization scale from trajectory data.
+    estimate_trajectory_span_std(df, Dt)
+        Estimate a single position scale from trajectory span data.
     from_tracks(df, Dt, max_frame_distance, sigma_deviation, scaling)
         Convenience constructor that estimates parameters from the data.
     get_subgraphs(graph)
@@ -101,37 +101,40 @@ class GraphFromTrajectories:
         return connectivity_radius
 
     @staticmethod
-    def estimate_max_trajectory_span(df: TracksDataFrame, Dt: int) -> float:
-        """Estimate a position normalization scale from trajectory data.
+    def estimate_trajectory_span_std(df: TracksDataFrame, Dt: int) -> float:
+        """Estimate a single position scale from coordinate spans within Dt-length windows.
 
-        Computes the maximum spatial span observed within any window of
-        `Dt` consecutive detections across all particles and videos. This
-        value is used to normalize node coordinates during training so that
-        positions are on a consistent scale regardless of the recording.
+        For each particle trajectory, slides a window of length Dt and computes
+        the coordinate range (max - min) along x and y. Treats both axes as
+        samples of the same distribution (since trajectory orientation is
+        arbitrary) and returns their combined standard deviation as a scalar.
 
         Parameters
         ----------
         df : TracksDataFrame
-            Tracking data containing at least the columns
-            ["set", "x", "y"].
+            Tracking data containing at least "x", "y", "set", "label", "frame".
         Dt : int
-            Length of the time window in frames.
+            Window length in frames.
 
         Returns
         -------
         float
-            Maximum coordinate span observed within any Dt-frame window.
+            Standard deviation of all coordinate spans across both axes and
+            all Dt-length windows.
         """
-        max_span = 0.0
+        spans = []
         for video in df["set"].unique():
             df_video = df[df["set"] == video]
             for particle in df_video["label"].unique():
-                coords = df_video[df_video["label"] == particle][["x", "y"]].to_numpy()
-                for i in range(len(coords) - Dt):
-                    span = np.ptp(coords[i:i + Dt], axis=0).max()
-                    if span > max_span:
-                        max_span = span
-        return max_span
+                particle_data = df_video[df_video["label"] == particle].sort_values("frame")
+                coords = particle_data[["x", "y"]].to_numpy()
+                for i in range(len(coords) - Dt + 1):
+                    span = np.ptp(coords[i:i + Dt], axis=0)
+                    spans.append(span)
+        if not spans:
+            return 1.0
+        spans = np.array(spans)
+        return float(spans.std())
 
     @classmethod
     def from_tracks(
@@ -145,8 +148,8 @@ class GraphFromTrajectories:
         """Convenience constructor that estimates parameters from the data.
 
         Estimates the connectivity radius from observed displacements and
-        the position scale from trajectory spans, then instantiates the
-        graph builder with the estimated connectivity radius.
+        position statistics from Dt-length window spans, then instantiates
+        the graph builder with the estimated connectivity radius.
 
         Parameters
         ----------
@@ -164,13 +167,14 @@ class GraphFromTrajectories:
 
         Returns
         -------
-        tuple[GraphFromTrajectories, float]
-            The instantiated graph builder and the estimated position scale.
+        tuple[GraphFromTrajectories, np.ndarray]
+            The instantiated graph builder and the position std (shape (2,))
+            estimated from Dt-length window spans, for coordinate scaling.
         """
         displacements = df.compute_displacements()
         connectivity_radius = cls.estimate_connectivity_radius(displacements, sigma_deviation, scaling)
-        max_trajectory_span = cls.estimate_max_trajectory_span(df, Dt)
-        return cls(connectivity_radius=connectivity_radius, max_frame_distance=max_frame_distance), max_trajectory_span
+        trajectory_span_std = cls.estimate_trajectory_span_std(df, Dt)
+        return cls(connectivity_radius=connectivity_radius, max_frame_distance=max_frame_distance), trajectory_span_std
 
     @staticmethod
     def get_subgraphs(graph: Data) -> list[Data]:
@@ -256,10 +260,12 @@ class GraphFromTrajectories:
 
                 if distance < self.connectivity_radius:
                     edges.append([node_idx, neighbor_idx])
+                    norm_distance = distance / self.connectivity_radius
+                    norm_frame_gap = frame_gap / self.max_frame_distance
                     edge_features.append([
-                        distance / self.connectivity_radius,
-                        frame_gap / self.max_frame_distance,
-                        (distance ** 2) / (frame_gap / self.max_frame_distance),
+                        norm_distance,
+                        norm_frame_gap,
+                        (norm_distance ** 2) / norm_frame_gap,
                     ])
 
         edges = np.array(edges, dtype=np.int64)

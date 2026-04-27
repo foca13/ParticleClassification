@@ -1,5 +1,5 @@
 from enum import Enum
-from typing import Literal
+from typing import Literal, Optional
 
 import numpy as np
 import torch
@@ -18,7 +18,7 @@ class GraphDataset(torch.utils.data.Dataset):
     Wraps a list of PyG Data objects and serves randomly sampled temporal
     subgraphs at each iteration. Each subgraph is drawn from a random
     time window of length Dt within a randomly chosen graph, with node
-    coordinates centered and scaled by position_scale.
+    coordinates centered per-subgraph and scaled by trajectory_span_std.
 
     Parameters
     ----------
@@ -30,10 +30,11 @@ class GraphDataset(torch.utils.data.Dataset):
     dataset_size : int
         Number of subgraphs to serve per epoch, i.e. the value returned
         by __len__.
-    position_scale : float, optional
-        Scale factor used to normalise node coordinates in
-        center_and_scale_graph. Typically estimated via
-        GraphFromTrajectories.estimate_max_trajectory_span. Default is 1.
+    trajectory_span_std : float, optional
+        Standard deviation of coordinate spans across Dt-length trajectory
+        windows (both axes combined), used to scale node coordinates after
+        per-subgraph centering. Typically estimated via
+        GraphFromTrajectories.from_tracks. Default is 1.0.
     transform : callable, optional
         A transform following the PyG transform interface
         (Data -> Data) applied to each subgraph before scaling.
@@ -50,7 +51,7 @@ class GraphDataset(torch.utils.data.Dataset):
     Methods
     -------
     center_and_scale_graph(graph)
-        Center and scale node coordinates by position_scale.
+        Center per-subgraph and scale by trajectory_span_std.
     __len__()
         Return the dataset size.
     __getitem__(idx)
@@ -62,7 +63,7 @@ class GraphDataset(torch.utils.data.Dataset):
         graph_dataset: list,
         Dt: int,
         dataset_size: int,
-        position_scale: float = 1,
+        trajectory_span_std: Optional[float] = None,
         transform: callable = None,
         target: Literal["edges", "nodes", "global"] = "edges",
         sample_balanced: bool = False,
@@ -70,7 +71,7 @@ class GraphDataset(torch.utils.data.Dataset):
         self.Dt = Dt
         self.graph_dataset = [graph for graph in graph_dataset if len(graph.x) >= Dt]
         self.dataset_size = dataset_size
-        self.position_scale = position_scale
+        self.trajectory_span_std = float(trajectory_span_std) if trajectory_span_std is not None else 1.0
         self.transform = transform
         self._target = None
         self.target = target
@@ -88,9 +89,9 @@ class GraphDataset(torch.utils.data.Dataset):
     def center_and_scale_graph(self, graph: Data) -> Data:
         """Center and scale node coordinates.
 
-        Subtracts the mean position and divides by position_scale so
-        that coordinates are centered at the origin and on a consistent
-        scale across recordings.
+        Subtracts the per-subgraph mean (centering at origin) and divides
+        by trajectory_span_std so that coordinates are on a consistent scale
+        across recordings.
 
         Parameters
         ----------
@@ -100,10 +101,10 @@ class GraphDataset(torch.utils.data.Dataset):
         Returns
         -------
         Data
-            A cloned Data object with scaled node coordinates.
+            A cloned Data object with centered and scaled node coordinates.
         """
         graph = graph.clone()
-        graph.x = (graph.x - torch.mean(graph.x, dim=0)) / self.position_scale
+        graph.x = (graph.x - graph.x.mean(dim=0)) / self.trajectory_span_std
         return graph
 
     def __len__(self) -> int:

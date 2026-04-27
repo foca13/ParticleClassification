@@ -27,11 +27,10 @@ import torch
 import yaml
 from torch_geometric.data import Batch
 
-from scripts.train import (
-    run,
-    evaluate,
-    plot_confusion_matrix,
+from trajan.trainer import evaluate, run
+from trajan.visualization import (
     plot_classification_report,
+    plot_confusion_matrix,
     save_classification_report,
 )
 from trajan.data import TracksDataFrame
@@ -64,7 +63,7 @@ def _generate_splits(type_sets: dict, n_splits: int, test_size: float, master_se
     return splits
 
 
-def _evaluate(model, val_data, graph_builder, position_scale, type_to_code) -> list[dict]:
+def _evaluate(model, val_data, graph_builder, trajectory_span_std, type_to_code) -> list[dict]:
     """Evaluate the model on each trajectory in the validation recordings.
 
     Builds graphs per recording individually so that (type, val_set) identity is
@@ -82,7 +81,7 @@ def _evaluate(model, val_data, graph_builder, position_scale, type_to_code) -> l
             with torch.no_grad():
                 for traj_idx, graph in enumerate(graphs):
                     g = graph.clone()
-                    g.x = (g.x - g.x.mean(dim=0)) / position_scale
+                    g.x = (g.x - g.x.mean(dim=0)) / trajectory_span_std
                     batch = Batch.from_data_list([g])
                     pred_code = torch.argmax(model(batch), dim=1).item()
                     records.append({
@@ -155,11 +154,11 @@ def main():
         save_classification_report(report_df, run_dir / "classification_report.csv")
 
         train_data, val_data = data.split_train_test_manual(split["val_tracks"])
-        graph_builder, position_scale = GraphFromTrajectories.from_tracks(
+        graph_builder, trajectory_span_std = GraphFromTrajectories.from_tracks(
             train_data, cfg["graph"]["Dt"], cfg["graph"]["max_frame_distance"]
         )
 
-        records = _evaluate(best_model, val_data, graph_builder, position_scale, type_to_code)
+        records = _evaluate(best_model, val_data, graph_builder, trajectory_span_std, type_to_code)
         for r in records:
             r["split_id"] = split_id
             r["seed"] = split["seed"]

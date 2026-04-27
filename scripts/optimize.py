@@ -8,7 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import optuna
 import yaml
 
-from scripts.train import run
+from trajan.trainer import run
 
 
 def _repo_root() -> Path:
