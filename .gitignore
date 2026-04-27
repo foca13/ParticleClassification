@@ -1,3 +1,16 @@
-/data
-/results
-/tmp
+# Data and outputs
+data/
+runs/
+results/
+tmp/
+
+# Python
+__pycache__/
+*.egg-info/
+
+# Jupyter and Lightning
+notebooks/lightning_logs/
+
+# OS and editor
+.DS_Store
+.vscode/
