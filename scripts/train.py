@@ -1,7 +1,6 @@
 import argparse
-import shutil
+from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 import deeplay as dl
 import matplotlib.pyplot as plt
@@ -29,14 +28,11 @@ from trajan.transforms import RandomFlip, RandomRotation
 def build_run_name(cfg: dict) -> str:
     m = cfg["model"]
     g = cfg["graph"]
-    t = cfg["training"]
-    return (
-        f"dim{m['encoder_dimension']}"
-        f"_blocks{m['num_blocks']}"
-        f"_Dt{g['Dt']}"
-        f"_lr{t['lr']}"
-        f"_wd{t['weight_decay']}"
-    )
+    return f"dim{m['encoder_dimension']}_blocks{m['num_blocks']}_Dt{g['Dt']}"
+
+
+def build_run_id() -> str:
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
 
 
 def _store_classification_report(report_df: pd.DataFrame, run_dir: Path):
@@ -68,7 +64,7 @@ def _store_classification_report(report_df: pd.DataFrame, run_dir: Path):
     plt.close(fig)
 
 
-def run(cfg: dict, config_path: Optional[str] = None, trial=None) -> float:
+def run(cfg: dict, trial=None) -> float:
     """Run a full training pipeline from a config dictionary.
 
     Parameters
@@ -86,12 +82,16 @@ def run(cfg: dict, config_path: Optional[str] = None, trial=None) -> float:
     L.seed_everything(cfg["seed"])
 
     run_name = build_run_name(cfg)
-    logger = CSVLogger(save_dir=cfg["output_dir"], name=run_name)
-    run_dir = Path(logger.log_dir)
+    run_id = build_run_id()
+
+    run_dir = Path(cfg["output_dir"]) / run_name / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    if config_path is not None:
-        shutil.copy(config_path, run_dir / "config.yaml")
+    logger = CSVLogger(
+        save_dir=cfg["output_dir"],
+        name=run_name,
+        version=run_id,
+    )
 
     # -------------------------------------------------------------------------
     # Data
@@ -110,6 +110,17 @@ def run(cfg: dict, config_path: Optional[str] = None, trial=None) -> float:
             test_size=cfg["data"]["test_size"],
             seed=cfg["seed"],
         )
+
+    val_labels = {
+        ptype: {
+            int(s): sorted(val_data[(val_data["type"] == ptype) & (val_data["set"] == s)]["label"].unique().tolist())
+            for s in val_data[val_data["type"] == ptype]["set"].unique()
+        }
+        for ptype in val_data["type"].unique()
+    }
+    saved_cfg = {**cfg, "data": {**cfg["data"], "split_mode": "manual" if val_sets is not None else "random_split", "val_labels": val_labels}}
+    with open(run_dir / "config.yaml", "w") as f:
+        yaml.dump(saved_cfg, f, default_flow_style=False, sort_keys=False)
 
     # -------------------------------------------------------------------------
     # Graphs
@@ -153,13 +164,11 @@ def run(cfg: dict, config_path: Optional[str] = None, trial=None) -> float:
         train_dataset,
         batch_size=cfg["training"]["batch_size"],
         shuffle=True,
-        drop_last=True,
         num_workers=0,
     )
     val_loader = DataLoader(
         val_dataset,
         batch_size=cfg["training"]["val_batch_size"],
-        drop_last=True,
         num_workers=0,
     )
 
@@ -220,7 +229,7 @@ def run(cfg: dict, config_path: Optional[str] = None, trial=None) -> float:
     fig.savefig(run_dir / "training_curves.png")
     plt.close(fig)
 
-    best_val_loss = checkpoint_cb.best_model_score.item()
+    best_val_loss = checkpoint_cb.best_model_score.item() if checkpoint_cb.best_model_score is not None else float("inf")
 
     # -------------------------------------------------------------------------
     # Evaluation (skipped during HPO)
@@ -259,7 +268,7 @@ def run(cfg: dict, config_path: Optional[str] = None, trial=None) -> float:
         print(report_df.to_string())
         _store_classification_report(report_df, run_dir)
 
-    return best_val_loss
+    return best_val_loss, run_dir
 
 
 if __name__ == "__main__":
@@ -270,4 +279,4 @@ if __name__ == "__main__":
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
 
-    run(cfg, config_path=args.config)
+    run(cfg)
