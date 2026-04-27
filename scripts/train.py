@@ -4,18 +4,13 @@ from pathlib import Path
 
 import deeplay as dl
 import matplotlib.pyplot as plt
-import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
 import yaml
 from lightning.pytorch.callbacks import ModelCheckpoint
 from lightning.pytorch.loggers import CSVLogger
-from sklearn.metrics import (
-    ConfusionMatrixDisplay,
-    classification_report,
-    confusion_matrix,
-)
+from sklearn.metrics import ConfusionMatrixDisplay, classification_report, confusion_matrix
 from torch_geometric.loader import DataLoader
 from torchvision.transforms import Compose
 
