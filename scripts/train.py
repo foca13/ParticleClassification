@@ -42,7 +42,7 @@ def _store_classification_report(report_df: pd.DataFrame, run_dir: Path):
     with open(run_dir / "classification_report.csv", "a") as f:
         f.write(f"\naccuracy,{accuracy:.2f}")
 
-    fig, ax = plt.subplots(figsize=(8, 2))
+    fig, ax = plt.subplots(figsize=(8, 2.5))
     ax.axis("off")
     table = ax.table(
         cellText=report_df.values,
@@ -53,7 +53,7 @@ def _store_classification_report(report_df: pd.DataFrame, run_dir: Path):
     table.auto_set_font_size(False)
     table.set_fontsize(10)
     ax.text(
-        -0.164, 0.35,
+        -0.164, 0.1,
         f"accuracy: {accuracy:.2f}",
         transform=ax.transAxes,
         fontsize=10,
@@ -102,25 +102,24 @@ def run(cfg: dict, trial=None) -> float:
     data_description = data.describe_tracks()
     display_labels = data_description["particle_types"]
 
-    val_sets = cfg["data"].get("val_sets")
-    if val_sets is not None:
-        train_data, val_data = data.split_train_test_manual(val_sets)
+    val_tracks = cfg["data"].get("val_tracks")
+    if val_tracks is not None:
+        train_data, val_data = data.split_train_test_manual(val_tracks)
     else:
         train_data, val_data = data.split_train_test(
             test_size=cfg["data"]["test_size"],
             seed=cfg["seed"],
         )
+        cfg["data"]["val_tracks"] = "random_split"
 
-    val_labels = {
-        ptype: {
-            int(s): sorted(val_data[(val_data["type"] == ptype) & (val_data["set"] == s)]["label"].unique().tolist())
-            for s in val_data[val_data["type"] == ptype]["set"].unique()
-        }
-        for ptype in val_data["type"].unique()
-    }
-    saved_cfg = {**cfg, "data": {**cfg["data"], "split_mode": "manual" if val_sets is not None else "random_split", "val_labels": val_labels}}
+    class _InlineListDumper(yaml.Dumper):
+        pass
+    _InlineListDumper.add_representer(
+        list,
+        lambda dumper, data: dumper.represent_sequence("tag:yaml.org,2002:seq", data, flow_style=True),
+    )
     with open(run_dir / "config.yaml", "w") as f:
-        yaml.dump(saved_cfg, f, default_flow_style=False, sort_keys=False)
+        yaml.dump(cfg, f, Dumper=_InlineListDumper, default_flow_style=False, sort_keys=False)
 
     # -------------------------------------------------------------------------
     # Graphs
