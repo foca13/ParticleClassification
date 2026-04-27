@@ -1,10 +1,15 @@
 # configs/default.yaml
 seed: 42
+output_dir: "runs"
 
 data:
   path: "data/cytoplasmic_data/tracks.csv"
   frame_rate: 10
   test_size: 0.25
+  # val_sets:                          # manual validation split (overrides test_size/seed)
+  #   late_endosome: [2, 3]
+  #   Golgi: [0]
+  #   Postgolgitoendosome: [1, 4]
 
 graph:
   max_frame_distance: 3
@@ -20,6 +25,6 @@ training:
   weight_decay: 1e-5
   batch_size: 16
   val_batch_size: 256
-  num_epochs: 10
+  num_epochs: 20
   sample_balanced: true
   dataset_size_multiplier: 2
