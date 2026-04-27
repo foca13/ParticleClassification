@@ -1,6 +1,7 @@
 import argparse
 import shutil
 from pathlib import Path
+from typing import Optional
 
 import deeplay as dl
 import matplotlib.pyplot as plt
@@ -38,7 +39,36 @@ def build_run_name(cfg: dict) -> str:
     )
 
 
-def run(cfg: dict, trial=None) -> float:
+def _store_classification_report(report_df: pd.DataFrame, run_dir: Path):
+    accuracy = report_df.loc["accuracy", "f1-score"]
+    report_df = report_df.drop("accuracy")
+    report_df.to_csv(run_dir / "classification_report.csv")
+    with open(run_dir / "classification_report.csv", "a") as f:
+        f.write(f"\naccuracy,{accuracy:.2f}")
+
+    fig, ax = plt.subplots(figsize=(8, 2))
+    ax.axis("off")
+    table = ax.table(
+        cellText=report_df.values,
+        rowLabels=report_df.index,
+        colLabels=report_df.columns,
+        loc="center",
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(10)
+    ax.text(
+        -0.164, 0.35,
+        f"accuracy: {accuracy:.2f}",
+        transform=ax.transAxes,
+        fontsize=10,
+        va="bottom",
+        ha="left",
+    )
+    fig.savefig(run_dir / "classification_report.png", bbox_inches="tight", dpi=150)
+    plt.close(fig)
+
+
+def run(cfg: dict, config_path: Optional[str] = None, trial=None) -> float:
     """Run a full training pipeline from a config dictionary.
 
     Parameters
@@ -56,11 +86,12 @@ def run(cfg: dict, trial=None) -> float:
     L.seed_everything(cfg["seed"])
 
     run_name = build_run_name(cfg)
-    output_dir = Path("outputs") / run_name
-    output_dir.mkdir(parents=True, exist_ok=True)
+    logger = CSVLogger(save_dir=cfg["output_dir"], name=run_name)
+    run_dir = Path(logger.log_dir)
+    run_dir.mkdir(parents=True, exist_ok=True)
 
-    # Save config to output directory for reproducibility
-    shutil.copy(args.config, output_dir / "config.yaml")
+    if config_path is not None:
+        shutil.copy(config_path, run_dir / "config.yaml")
 
     # -------------------------------------------------------------------------
     # Data
@@ -71,10 +102,14 @@ def run(cfg: dict, trial=None) -> float:
     data_description = data.describe_tracks()
     display_labels = data_description["particle_types"]
 
-    train_data, val_data = data.split_train_test(
-        test_size=cfg["data"]["test_size"],
-        seed=cfg["seed"],
-    )
+    val_sets = cfg["data"].get("val_sets")
+    if val_sets is not None:
+        train_data, val_data = data.split_train_test_manual(val_sets)
+    else:
+        train_data, val_data = data.split_train_test(
+            test_size=cfg["data"]["test_size"],
+            seed=cfg["seed"],
+        )
 
     # -------------------------------------------------------------------------
     # Graphs
@@ -144,8 +179,8 @@ def run(cfg: dict, trial=None) -> float:
     model = dl.CategoricalClassifier(
         model=magik,
         optimizer=dl.Adam(
-            lr=cfg["training"]["lr"],
-            weight_decay=cfg["training"]["weight_decay"],
+            lr=float(cfg["training"]["lr"]),
+            weight_decay=float(cfg["training"]["weight_decay"]),
         ),
         loss=nn.CrossEntropyLoss(),
         num_classes=num_classes,
@@ -155,7 +190,7 @@ def run(cfg: dict, trial=None) -> float:
     # Callbacks and logger
     # -------------------------------------------------------------------------
     checkpoint_cb = ModelCheckpoint(
-        dirpath=output_dir,
+        dirpath=run_dir,
         filename="best",
         monitor="val_loss",
         mode="min",
@@ -167,8 +202,6 @@ def run(cfg: dict, trial=None) -> float:
     if trial is not None:
         from optuna.integration import PyTorchLightningPruningCallback
         callbacks.append(PyTorchLightningPruningCallback(trial, monitor="val_loss"))
-
-    logger = CSVLogger(save_dir="outputs", name=run_name)
 
     # -------------------------------------------------------------------------
     # Training
@@ -182,6 +215,10 @@ def run(cfg: dict, trial=None) -> float:
     )
 
     trainer.fit(model, train_loader, val_loader)
+
+    fig, ax = trainer.history.plot()
+    fig.savefig(run_dir / "training_curves.png")
+    plt.close(fig)
 
     best_val_loss = checkpoint_cb.best_model_score.item()
 
@@ -207,11 +244,11 @@ def run(cfg: dict, trial=None) -> float:
         # Confusion matrix
         cm = confusion_matrix(truth, preds)
         cm_df = pd.DataFrame(cm, index=display_labels, columns=display_labels)
-        cm_df.to_csv(output_dir / "confusion_matrix.csv")
+        cm_df.to_csv(run_dir / "confusion_matrix.csv")
 
         fig, ax = plt.subplots()
         ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=display_labels).plot(ax=ax)
-        fig.savefig(output_dir / "confusion_matrix.png", bbox_inches="tight", dpi=150)
+        fig.savefig(run_dir / "confusion_matrix.png", bbox_inches="tight", dpi=150)
         plt.close(fig)
 
         # Classification report
@@ -219,19 +256,18 @@ def run(cfg: dict, trial=None) -> float:
             truth, preds, target_names=display_labels, output_dict=True
         )
         report_df = pd.DataFrame(report).T.round(2)
-        report_df.to_csv(output_dir / "classification_report.csv")
-
         print(report_df.to_string())
+        _store_classification_report(report_df, run_dir)
 
     return best_val_loss
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default="configs/default.yaml")
+    parser.add_argument("--config", default="configs/base.yaml")
     args = parser.parse_args()
 
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
 
-    run(cfg)
+    run(cfg, config_path=args.config)
