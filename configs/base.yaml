@@ -3,7 +3,7 @@ seed: 42
 output_dir: "runs"
 
 data:
-  path: "data/cytoplasmic_data/tracks.csv"
+  path: "data/cytoplasmic/tracks.csv"
   frame_rate: 10
   test_size: 0.25
   # val_tracks:                           # manual validation split (overrides test_size/seed)
@@ -21,13 +21,13 @@ model:
   num_classes: 3
 
 training:
-  lr: 5e-4
+  lr: 1e-3
   weight_decay: 5e-4
   batch_size: 16
   val_batch_size: 256
-  num_epochs: 60
+  num_epochs: 30
   sample_balanced: true
   weighted_loss: false
   dataset_size_multiplier: auto           # integer multiplier, or "auto" = total_frames / Dt
-  scheduler:                            # cosine annealing (remove comment to enable)
-    eta_min: 5e-5                       # minimum LR at end of training
+  # scheduler:                            # cosine annealing (remove comment to enable)
+  #   eta_min: 5e-5                       # minimum LR at end of training
