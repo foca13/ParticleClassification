@@ -6,6 +6,8 @@ from typing import Dict, List, Optional, Tuple, Union
 import numpy as np
 import pandas as pd
 
+from trajan.features import compute_trajectory_features
+
 
 def load_xml_files(dir_path: str) -> List[ET.ElementTree]:
     """Recursively load all XML files from a directory.
@@ -320,6 +322,26 @@ class TracksDataFrame(pd.DataFrame):
 
         displacements = np.concatenate(displacements)
         return displacements
+
+    def compute_features(self) -> pd.DataFrame:
+        """Compute hand-crafted trajectory features for all particles.
+        ...
+        """
+        rows = []
+        for video in self["set"].unique():
+            df_video = self[self["set"] == video]
+            for label in df_video["label"].unique():
+                track = df_video[df_video["label"] == label].sort_values("frame")
+                coords = track[["x", "y"]].to_numpy()
+                if len(coords) < 3:
+                    continue
+                features = compute_trajectory_features(coords, frame_rate=self.frame_rate)
+                features["set"] = video
+                features["label"] = label
+                if "type" in self.columns:
+                    features["type"] = track["type"].iloc[0]
+                rows.append(features)
+        return pd.DataFrame(rows)
 
 
 def to_tracks_dataframe(
