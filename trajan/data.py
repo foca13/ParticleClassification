@@ -1,4 +1,3 @@
-import json
 import pathlib
 import warnings
 import xml.etree.ElementTree as ET
@@ -189,7 +188,7 @@ class TracksDataFrame(pd.DataFrame):
             adjusted.append(copy)
         return cls(pd.concat(adjusted, ignore_index=True), frame_rate=frame_rate)
 
-    def describe_tracks(self) -> Dict:
+    def describe_tracks(self, print_msg: bool = True) -> Dict:
         particle_types = self["type"].unique().tolist()
         description = {"particle_types": particle_types}
 
@@ -205,23 +204,33 @@ class TracksDataFrame(pd.DataFrame):
 
             description[particle_type] = {
                 "n_recordings": len(videos),
+                "recording_ids": list(map(int, videos)),
                 "n_tracks": total_tracks,
                 "avg_track_len": avg_track_len,
             }
 
-        print(json.dumps(description, indent=2, default=str))
+        if print_msg:
+            for key, value in description.items():
+                if isinstance(value, dict):
+                    print(f"\n{key}:")
+                    for k, v in value.items():
+                        print(f"  {k}: {v}")
+                else:
+                    print(f"{key}: {value}")
         return description
 
-    def split_train_test(self, test_size: float = 0.25, seed=None) -> Tuple["TracksDataFrame", "TracksDataFrame"]:
-        """Split data into train and test sets.
+    def split_train_test(self, test_size: float = 0.25, seed: Optional[int] = None) -> Tuple["TracksDataFrame", "TracksDataFrame"]:
+        """Split data into train and test sets by recording.
 
-        Splitting is stratified by particle type and video, so each
-        recording contributes test tracks proportionally.
+        Splitting is stratified by particle type, so each particle type
+        contributes test recordings proportionally. All tracks from a given
+        recording appear in either train or test, never both, simulating
+        generalisation to unseen recordings.
 
         Parameters
         ----------
         test_size : float, optional
-            Fraction of tracks to use for testing. Default is 0.25.
+            Fraction of recordings to use for testing. Default is 0.25.
         seed : int, optional
             Random seed for reproducibility. Default is None.
 
@@ -235,15 +244,13 @@ class TracksDataFrame(pd.DataFrame):
 
         for particle_type in self["type"].unique():
             selected_type = self[self["type"] == particle_type]
-            for video in selected_type["set"].unique():
-                tracks = selected_type[selected_type["set"] == video]
-                track_ids = tracks["label"].unique()
-                n_test = int(round(len(track_ids) * test_size))
-                if n_test == 0:
-                    warnings.warn(f"No test tracks for particle type '{particle_type}' in video '{video}'")
-                test_ids = rng.choice(track_ids, n_test, replace=False)
-                test_data.append(tracks[tracks["label"].isin(test_ids)])
-                train_data.append(tracks[~tracks["label"].isin(test_ids)])
+            recordings = selected_type["set"].unique()
+            n_test = int(round(len(recordings) * test_size))
+            if n_test == 0:
+                warnings.warn(f"No test recordings for particle type '{particle_type}'")
+            test_recordings = rng.choice(recordings, n_test, replace=False)
+            test_data.append(selected_type[selected_type["set"].isin(test_recordings)])
+            train_data.append(selected_type[~selected_type["set"].isin(test_recordings)])
 
         train_data = TracksDataFrame(pd.concat(train_data, ignore_index=True), frame_rate=self.frame_rate)
         test_data = TracksDataFrame(pd.concat(test_data, ignore_index=True), frame_rate=self.frame_rate)

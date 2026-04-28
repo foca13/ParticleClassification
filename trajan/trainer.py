@@ -1,6 +1,7 @@
 from datetime import datetime
 from pathlib import Path
 
+import numpy as np
 import deeplay as dl
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -9,7 +10,7 @@ import torch.nn as nn
 import yaml
 from lightning.pytorch.callbacks import ModelCheckpoint
 from lightning.pytorch.loggers import CSVLogger
-from sklearn.metrics import ConfusionMatrixDisplay, classification_report, confusion_matrix
+from sklearn.metrics import classification_report, confusion_matrix
 from torch_geometric.loader import DataLoader
 from torchvision.transforms import Compose
 
@@ -18,6 +19,18 @@ from trajan.data import TracksDataFrame
 from trajan.dataset import GraphDataset
 from trajan.graph import GraphFromTrajectories
 from trajan.transforms import RandomFlip, RandomRotation
+
+
+def check_val_coverage(dataset: "GraphDataset", num_classes: int, display_labels: list, Dt: int) -> None:
+    """Raise ValueError if any class has no validation trajectories of length >= Dt."""
+    present = {int(g.graph_label.item()) for g in dataset.graph_dataset}
+    missing = set(range(num_classes)) - present
+    if missing:
+        missing_names = [display_labels[i] for i in sorted(missing)]
+        raise ValueError(
+            f"Validation set has no trajectories of length >= Dt={Dt} for "
+            f"class(es): {missing_names}. Use a different split or reduce Dt."
+        )
 
 
 def build_run_name(cfg: dict) -> str:
@@ -80,8 +93,8 @@ def run(cfg: dict, trial=None):
 
     Returns
     -------
-    tuple[float, Path, dl.CategoricalClassifier, DataLoader, list[str]]
-        best_val_loss, run_dir, best_model, val_loader, display_labels.
+    tuple[float, Path, dl.CategoricalClassifier, DataLoader, DataLoader, list[str]]
+        best_val_loss, run_dir, best_model, train_loader, val_loader, display_labels.
     """
     L.seed_everything(cfg["seed"])
 
@@ -143,8 +156,13 @@ def run(cfg: dict, trial=None):
     # -------------------------------------------------------------------------
     transform = Compose([RandomRotation(), RandomFlip()])
 
-    train_dataset_size = cfg["training"]["dataset_size_multiplier"] * len(train_graphs)
-    val_dataset_size = cfg["training"]["dataset_size_multiplier"] * len(val_graphs)
+    dm = cfg["training"]["dataset_size_multiplier"]
+    if dm == "auto":
+        train_dataset_size = int(sum(len(g.x) for g in train_graphs) / Dt)
+        val_dataset_size = 5 * int(sum(len(g.x) for g in val_graphs) / Dt)
+    else:
+        train_dataset_size = int(dm) * len(train_graphs)
+        val_dataset_size = 5 * int(dm) * len(val_graphs)
 
     train_dataset = GraphDataset(
         train_graphs,
@@ -162,6 +180,8 @@ def run(cfg: dict, trial=None):
         trajectory_span_std=trajectory_span_std,
         target="global",
     )
+
+    check_val_coverage(val_dataset, cfg["model"]["num_classes"], display_labels, Dt)
 
     train_loader = DataLoader(
         train_dataset,
@@ -188,15 +208,39 @@ def run(cfg: dict, trial=None):
         out_features=num_classes,
     ).create()
 
+    if cfg["training"].get("weighted_loss", False):
+        labels = np.array([g.graph_label.item() for g in train_graphs])
+        counts = np.bincount(labels, minlength=num_classes).astype(float)
+        class_weights = torch.tensor(len(labels) / (num_classes * counts), dtype=torch.float)
+        loss_fn = nn.CrossEntropyLoss(weight=class_weights)
+    else:
+        loss_fn = nn.CrossEntropyLoss()
+
     model = dl.CategoricalClassifier(
         model=magik,
         optimizer=dl.Adam(
             lr=float(cfg["training"]["lr"]),
             weight_decay=float(cfg["training"]["weight_decay"]),
         ),
-        loss=nn.CrossEntropyLoss(),
+        loss=loss_fn,
         num_classes=num_classes,
     ).build()
+
+    if "scheduler" in cfg["training"]:
+        import types
+        _lr = float(cfg["training"]["lr"])
+        _wd = float(cfg["training"]["weight_decay"])
+        _T_max = cfg["training"]["num_epochs"]
+        _eta_min = float(cfg["training"]["scheduler"].get("eta_min", 0))
+
+        def _configure_optimizers(self):
+            optimizer = torch.optim.Adam(self.parameters(), lr=_lr, weight_decay=_wd)
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, T_max=_T_max, eta_min=_eta_min
+            )
+            return [optimizer], [{"scheduler": scheduler, "interval": "epoch"}]
+
+        model.configure_optimizers = types.MethodType(_configure_optimizers, model)
 
     # -------------------------------------------------------------------------
     # Callbacks and logger
@@ -239,4 +283,4 @@ def run(cfg: dict, trial=None):
     else:
         best_model = model
 
-    return best_val_loss, run_dir, best_model, val_loader, display_labels
+    return best_val_loss, run_dir, best_model, train_loader, val_loader, display_labels

@@ -6,25 +6,28 @@ data:
   path: "data/cytoplasmic_data/tracks.csv"
   frame_rate: 10
   test_size: 0.25
-  # val_sets:                          # manual validation split (overrides test_size/seed)
-  #   late_endosome: [2, 3]
-  #   Golgi: [0]
-  #   Postgolgitoendosome: [1, 4]
+  # val_tracks:                           # manual validation split (overrides test_size/seed)
+  #   endosome: [2, 3, 10, 12]
+  #   golgi: [0, 1]
+  #   postgolgi: [1, 4, 7]
 
 graph:
   max_frame_distance: 3
-  Dt: 50
+  Dt: 80
 
 model:
   encoder_dimension: 96
-  num_blocks: 3
+  num_blocks: 4
   num_classes: 3
 
 training:
   lr: 5e-4
-  weight_decay: 1e-5
+  weight_decay: 5e-4
   batch_size: 16
   val_batch_size: 256
-  num_epochs: 20
+  num_epochs: 60
   sample_balanced: true
-  dataset_size_multiplier: 2
+  weighted_loss: false
+  dataset_size_multiplier: auto           # integer multiplier, or "auto" = total_frames / Dt
+  scheduler:                            # cosine annealing (remove comment to enable)
+    eta_min: 5e-5                       # minimum LR at end of training

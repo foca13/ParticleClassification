@@ -138,20 +138,23 @@ def main():
         cfg["data"]["val_tracks"] = split["val_tracks"]
         cfg["seed"] = split["seed"]
 
-        best_val_loss, run_dir, best_model, val_loader, display_labels = run(cfg)
+        best_val_loss, run_dir, best_model, train_loader, val_loader, display_labels = run(cfg)
 
-        report_df, cm_df = evaluate(best_model, val_loader, display_labels)
-        print(report_df.to_string())
+        for loader, split in [(train_loader, "train"), (val_loader, "val")]:
+            split_dir = run_dir / split
+            split_dir.mkdir()
+            report_df, cm_df = evaluate(best_model, loader, display_labels)
+            print(report_df.to_string())
 
-        fig = plot_confusion_matrix(cm_df, display_labels)
-        fig.savefig(run_dir / "confusion_matrix.png", bbox_inches="tight", dpi=150)
-        plt.close(fig)
-        cm_df.to_csv(run_dir / "confusion_matrix.csv")
+            fig = plot_confusion_matrix(cm_df, display_labels)
+            fig.savefig(split_dir / "confusion_matrix.png", bbox_inches="tight", dpi=150)
+            plt.close(fig)
+            cm_df.to_csv(split_dir / "confusion_matrix.csv")
 
-        fig = plot_classification_report(report_df)
-        fig.savefig(run_dir / "classification_report.png", bbox_inches="tight", dpi=150)
-        plt.close(fig)
-        save_classification_report(report_df, run_dir / "classification_report.csv")
+            fig = plot_classification_report(report_df)
+            fig.savefig(split_dir / "classification_report.png", bbox_inches="tight", dpi=150)
+            plt.close(fig)
+            save_classification_report(report_df, split_dir / "classification_report.csv")
 
         train_data, val_data = data.split_train_test_manual(split["val_tracks"])
         graph_builder, trajectory_span_std = GraphFromTrajectories.from_tracks(

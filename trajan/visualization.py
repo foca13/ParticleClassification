@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 from torch_geometric.data import Data
 from torch_geometric.utils import to_networkx
 import pandas as pd
-from sklearn.metrics import ConfusionMatrixDisplay, classification_report, confusion_matrix
+from sklearn.metrics import ConfusionMatrixDisplay
 from pathlib import Path
 
 
