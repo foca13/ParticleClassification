@@ -21,7 +21,7 @@ model:
   num_classes: 3
 
 training:
-  lr: 1e-3
+  lr: 1e-4
   weight_decay: 5e-4
   batch_size: 16
   val_batch_size: 256
@@ -29,5 +29,7 @@ training:
   sample_balanced: true
   weighted_loss: false
   dataset_size_multiplier: auto           # integer multiplier, or "auto" = total_frames / Dt
-  # scheduler:                            # cosine annealing (remove comment to enable)
-  #   eta_min: 5e-5                       # minimum LR at end of training
+  # scheduler:                            # cosine annealing with warm restarts (remove comment to enable)
+  #   T_0: 10                             # epochs per restart cycle (default: num_epochs // 3)
+  #   T_mult: 1                           # cycle length multiplier after each restart
+  #   eta_min: 5e-5                       # minimum LR at the bottom of each cycle

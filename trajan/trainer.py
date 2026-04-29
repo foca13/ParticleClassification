@@ -230,13 +230,14 @@ def run(cfg: dict, trial=None):
         import types
         _lr = float(cfg["training"]["lr"])
         _wd = float(cfg["training"]["weight_decay"])
-        _T_max = cfg["training"]["num_epochs"]
+        _T_0 = int(cfg["training"]["scheduler"].get("T_0", cfg["training"]["num_epochs"] // 3))
+        _T_mult = int(cfg["training"]["scheduler"].get("T_mult", 1))
         _eta_min = float(cfg["training"]["scheduler"].get("eta_min", 0))
 
         def _configure_optimizers(self):
             optimizer = torch.optim.Adam(self.parameters(), lr=_lr, weight_decay=_wd)
-            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                optimizer, T_max=_T_max, eta_min=_eta_min
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+                optimizer, T_0=_T_0, T_mult=_T_mult, eta_min=_eta_min
             )
             return [optimizer], [{"scheduler": scheduler, "interval": "epoch"}]
 
@@ -247,7 +248,6 @@ def run(cfg: dict, trial=None):
     # -------------------------------------------------------------------------
     checkpoint_cb = ModelCheckpoint(
         dirpath=run_dir,
-        filename="best",
         monitor="val_loss",
         mode="min",
         save_top_k=1,
