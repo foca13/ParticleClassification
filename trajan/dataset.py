@@ -1,5 +1,5 @@
 from enum import Enum
-from typing import Literal, Tuple
+from typing import Literal, Optional, Tuple
 
 import numpy as np
 import torch
@@ -35,6 +35,11 @@ class GraphDataset(torch.utils.data.Dataset):
     dataset_size : int
         Number of subgraphs to serve per epoch, i.e. the value returned
         by __len__.
+    position_std : float, optional
+        Standard deviation of coordinate spans across Dt-length trajectory
+        windows (both axes combined), used to scale node coordinates after
+        per-subgraph centering. Typically estimated via
+        GraphFromTrajectories.from_tracks. Default is 1.0.
     transform : callable, optional
         A transform following the PyG transform interface (Data -> Data)
         applied to each subgraph before statistics computation and scaling.
@@ -52,7 +57,7 @@ class GraphDataset(torch.utils.data.Dataset):
     compute_graph_statistics(graph)
         Compute local_scale and normalized_rg from raw node coordinates.
     center_and_scale_graph(graph)
-        Center node coordinates and normalize by local_scale.
+        Center per-subgraph and scale by position_std.
     __len__()
         Return the dataset size.
     __getitem__(idx)
@@ -64,13 +69,17 @@ class GraphDataset(torch.utils.data.Dataset):
         graph_dataset: list,
         Dt_range: Tuple[int, int],
         dataset_size: int,
+        position_std: Optional[float] = None,
+        connectivity_radius: Optional[float] = None,
         transform: callable = None,
-        target: Literal["edges", "nodes", "global"] = "edges",
-        sample_balanced: bool = False,
+        target: Literal["edges", "nodes", "global"] = "global",
+        sample_balanced: bool = True,
     ) -> None:
         self.Dt_range = Dt_range
         self.graph_dataset = [graph for graph in graph_dataset if len(graph.x) >= Dt_range[0]]
         self.dataset_size = dataset_size
+        self.position_std = float(position_std) if position_std is not None else 1.0
+        self.connectivity_radius = float(connectivity_radius) if connectivity_radius is not None else 1.0
         self.transform = transform
         self._target = None
         self.target = target
@@ -119,7 +128,7 @@ class GraphDataset(torch.utils.data.Dataset):
         expected_rg = torch.sqrt(local_scale ** 2 * T / 2)
         normalized_rg = rg / (expected_rg + 1e-10)
 
-        graph.local_scale = local_scale.unsqueeze(0)
+        graph.local_scale = local_scale.unsqueeze(0) / self.connectivity_radius
         graph.normalized_rg = normalized_rg.unsqueeze(0)
         graph.graph_features = torch.stack([local_scale, normalized_rg]).unsqueeze(0)
         return graph
@@ -141,7 +150,7 @@ class GraphDataset(torch.utils.data.Dataset):
         graph = graph.clone()
         coords = graph.x
         centered = coords - torch.mean(coords, dim=0)
-        graph.x = centered / graph.local_scale
+        graph.x = centered / self.position_std
         return graph
 
     def __getitem__(self, idx: int) -> Data:

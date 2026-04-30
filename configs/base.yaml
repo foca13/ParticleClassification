@@ -13,7 +13,7 @@ data:
 
 graph:
   max_frame_distance: 3
-  Dt_range: [80, 150]
+  Dt_range: [50, 120]
 
 model:
   encoder_dimension: 96
@@ -25,7 +25,7 @@ training:
   weight_decay: 5e-4
   batch_size: 16
   val_batch_size: 256
-  num_epochs: 80
+  num_epochs: 60
   sample_balanced: true
   weighted_loss: false
   dataset_size_multiplier: 3            # scales sampled trajectories: size = multiplier * total_frames / mean(Dt_range)

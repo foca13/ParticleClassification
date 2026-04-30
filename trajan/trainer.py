@@ -144,8 +144,8 @@ def run(cfg: dict, trial=None):
     Dt_range = cfg["graph"]["Dt_range"]
     max_frame_distance = cfg["graph"]["max_frame_distance"]
 
-    graph_builder = GraphFromTrajectories.from_tracks(
-        train_data, max_frame_distance
+    graph_builder, position_std = GraphFromTrajectories.from_tracks(
+        train_data, Dt_range[0], max_frame_distance
     )
 
     train_graphs = graph_builder(train_data, target_column="type", split_tracks=True)
@@ -164,6 +164,8 @@ def run(cfg: dict, trial=None):
         train_graphs,
         Dt_range,
         train_dataset_size,
+        position_std=position_std,
+        connectivity_radius=graph_builder.connectivity_radius,
         transform=transform,
         target="global",
         sample_balanced=cfg["training"]["sample_balanced"],
@@ -172,6 +174,8 @@ def run(cfg: dict, trial=None):
         val_graphs,
         Dt_range,
         val_dataset_size,
+        position_std=position_std,
+        connectivity_radius=graph_builder.connectivity_radius,
         target="global",
     )
 

@@ -63,7 +63,7 @@ def _generate_splits(type_sets: dict, n_splits: int, test_size: float, master_se
     return splits
 
 
-def _evaluate(model, val_data, graph_builder, type_to_code) -> list[dict]:
+def _evaluate(model, val_data, graph_builder, position_std, type_to_code) -> list[dict]:
     """Evaluate the model on each trajectory in the validation recordings.
 
     Builds graphs per recording individually so that (type, val_set) identity is
@@ -82,16 +82,21 @@ def _evaluate(model, val_data, graph_builder, type_to_code) -> list[dict]:
                 for traj_idx, graph in enumerate(graphs):
                     g = graph.clone()
                     coords = g.x
-                    centered = coords - torch.mean(coords, dim=0)
+                    centered = (coords - torch.mean(coords, dim=0)) / position_std
                     steps = torch.diff(coords, dim=0)
                     local_scale = torch.norm(steps, dim=1).mean() + 1e-10
                     T = coords.shape[0]
                     rg = torch.norm(centered, dim=1).pow(2).mean().sqrt()
                     expected_rg = torch.sqrt(local_scale ** 2 * T / 2)
                     normalized_rg = rg / (expected_rg + 1e-10)
+                    diffusion_coeff = (local_scale ** 2) / 4
                     g.local_scale = local_scale.unsqueeze(0)
                     g.normalized_rg = normalized_rg.unsqueeze(0)
-                    g.graph_features = torch.stack([local_scale, normalized_rg]).unsqueeze(0)
+                    g.radius_of_gyration = rg.unsqueeze(0)
+                    g.diffusion_coeff = diffusion_coeff.unsqueeze(0)
+                    g.graph_features = torch.stack(
+                        [local_scale, normalized_rg, rg, diffusion_coeff]
+                    ).unsqueeze(0)
                     g.x = centered / local_scale
                     batch = Batch.from_data_list([g])
                     pred_code = torch.argmax(model(batch), dim=1).item()
@@ -168,11 +173,11 @@ def main():
             save_classification_report(report_df, split_dir / "classification_report.csv")
 
         train_data, val_data = data.split_train_test_manual(split["val_tracks"])
-        graph_builder = GraphFromTrajectories.from_tracks(
-            train_data, cfg["graph"]["max_frame_distance"]
+        graph_builder, position_std = GraphFromTrajectories.from_tracks(
+            train_data, cfg["graph"]["Dt"], cfg["graph"]["max_frame_distance"]
         )
 
-        records = _evaluate(best_model, val_data, graph_builder, type_to_code)
+        records = _evaluate(best_model, val_data, graph_builder, position_std, type_to_code)
         for r in records:
             r["split_id"] = split_id
             r["seed"] = split["seed"]

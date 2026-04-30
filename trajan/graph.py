@@ -32,7 +32,9 @@ class GraphFromTrajectories:
     -------
     estimate_connectivity_radius(displacements, sigma_deviation, scaling)
         Estimate a connectivity radius from observed displacements.
-    from_tracks(df, max_frame_distance, sigma_deviation, scaling)
+    estimate_position_std(df, Dt)
+        Estimate a single position scale from trajectory span data.
+    from_tracks(df, Dt, max_frame_distance, sigma_deviation, scaling)
         Convenience constructor that estimates parameters from the data.
     get_subgraphs(graph)
         Split a graph into its connected components.
@@ -98,10 +100,49 @@ class GraphFromTrajectories:
         connectivity_radius = np.ceil(upper_displacement / order_of_magnitude) * order_of_magnitude
         return connectivity_radius
 
+    @staticmethod
+    def estimate_position_std(df: TracksDataFrame, Dt: int) -> float:
+        """Estimate the standard deviation of centered positions across all
+        Dt-length subtrajectory windows, pooled over both axes and all particles.
+
+        Used to normalise node coordinates so that positions have unit variance
+        across recordings, regardless of physical scale.
+
+        Parameters
+        ----------
+        df : TracksDataFrame
+            Tracking data containing at least "x", "y", "set", "label", "frame".
+        Dt : int
+            Window length in frames.
+
+        Returns
+        -------
+        float
+            Standard deviation of centered x and y coordinates pooled across
+            all Dt-length windows and both axes.
+        """
+        all_centered = []
+        for video in df["set"].unique():
+            df_video = df[df["set"] == video]
+            for particle in df_video["label"].unique():
+                coords = (
+                    df_video[df_video["label"] == particle]
+                    .sort_values("frame")[["x", "y"]]
+                    .to_numpy()
+                )
+                for i in range(len(coords) - Dt + 1):
+                    window = coords[i:i + Dt]
+                    centered = window - window.mean(axis=0)
+                    all_centered.append(centered)
+
+        all_centered = np.concatenate(all_centered, axis=0)
+        return float(np.std(all_centered))
+
     @classmethod
     def from_tracks(
         cls,
         df: TracksDataFrame,
+        Dt: int,
         max_frame_distance: int,
         sigma_deviation: float = 3,
         scaling: float = 1,
@@ -116,6 +157,9 @@ class GraphFromTrajectories:
         ----------
         df : TracksDataFrame
             Tracking data used to estimate parameters.
+        Dt : int
+            Length of the time window in frames, used to estimate the
+            position scale.
         max_frame_distance : int
             Maximum number of frames between two connected detections.
         sigma_deviation : float, optional
@@ -131,7 +175,8 @@ class GraphFromTrajectories:
         """
         displacements = df.compute_displacements()
         connectivity_radius = cls.estimate_connectivity_radius(displacements, sigma_deviation, scaling)
-        return cls(connectivity_radius=connectivity_radius, max_frame_distance=max_frame_distance)
+        position_std = cls.estimate_position_std(df, Dt)
+        return cls(connectivity_radius=connectivity_radius, max_frame_distance=max_frame_distance), position_std
 
     @staticmethod
     def get_subgraphs(graph: Data) -> list[Data]:
