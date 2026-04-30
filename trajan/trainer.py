@@ -15,28 +15,28 @@ from torch_geometric.loader import DataLoader
 from torchvision.transforms import Compose
 
 import lightning as L
+from trajan.custom_models.magik import MagikMPM
 from trajan.data import TracksDataFrame
 from trajan.dataset import GraphDataset
 from trajan.graph import GraphFromTrajectories
 from trajan.transforms import RandomFlip, RandomRotation
 
 
-def check_val_coverage(dataset: "GraphDataset", num_classes: int, display_labels: list, Dt: int) -> None:
-    """Raise ValueError if any class has no validation trajectories of length >= Dt."""
+def check_val_coverage(dataset: "GraphDataset", num_classes: int, display_labels: list) -> None:
+    """Raise ValueError if any class has no validation trajectories"""
     present = {int(g.graph_label.item()) for g in dataset.graph_dataset}
     missing = set(range(num_classes)) - present
     if missing:
         missing_names = [display_labels[i] for i in sorted(missing)]
         raise ValueError(
-            f"Validation set has no trajectories of length >= Dt={Dt} for "
-            f"class(es): {missing_names}. Use a different split or reduce Dt."
+            f"Validation set has no trajectories for "
+            f"class(es): {missing_names}. Use a different split or reduce Dt_range."
         )
 
 
 def build_run_name(cfg: dict) -> str:
-    m = cfg["model"]
     g = cfg["graph"]
-    return f"dim{m['encoder_dimension']}_blocks{m['num_blocks']}_Dt{g['Dt']}"
+    return f"Dt_min{g['Dt_range'][0]}_Dt_max{g['Dt_range'][1]}"
 
 
 def build_run_id() -> str:
@@ -141,11 +141,11 @@ def run(cfg: dict, trial=None):
     # -------------------------------------------------------------------------
     # Graphs
     # -------------------------------------------------------------------------
-    Dt = cfg["graph"]["Dt"]
+    Dt_range = cfg["graph"]["Dt_range"]
     max_frame_distance = cfg["graph"]["max_frame_distance"]
 
-    graph_builder, trajectory_span_std = GraphFromTrajectories.from_tracks(
-        train_data, Dt, max_frame_distance
+    graph_builder = GraphFromTrajectories.from_tracks(
+        train_data, max_frame_distance
     )
 
     train_graphs = graph_builder(train_data, target_column="type", split_tracks=True)
@@ -157,31 +157,28 @@ def run(cfg: dict, trial=None):
     transform = Compose([RandomRotation(), RandomFlip()])
 
     dm = cfg["training"]["dataset_size_multiplier"]
-    if dm == "auto":
-        train_dataset_size = int(sum(len(g.x) for g in train_graphs) / Dt)
-        val_dataset_size = 5 * int(sum(len(g.x) for g in val_graphs) / Dt)
-    else:
-        train_dataset_size = int(dm) * len(train_graphs)
-        val_dataset_size = 5 * int(dm) * len(val_graphs)
+    train_dataset_size = int(dm * sum(len(g.x) for g in train_graphs) / np.mean(Dt_range))
+    val_dataset_size = 5 * int(dm * sum(len(g.x) for g in val_graphs) / np.mean(Dt_range))
 
     train_dataset = GraphDataset(
         train_graphs,
-        Dt,
+        Dt_range,
         train_dataset_size,
-        trajectory_span_std=trajectory_span_std,
         transform=transform,
         target="global",
         sample_balanced=cfg["training"]["sample_balanced"],
     )
     val_dataset = GraphDataset(
         val_graphs,
-        Dt,
+        Dt_range,
         val_dataset_size,
-        trajectory_span_std=trajectory_span_std,
         target="global",
     )
 
-    check_val_coverage(val_dataset, cfg["model"]["num_classes"], display_labels, Dt)
+    check_val_coverage(val_dataset, cfg["model"]["num_classes"], display_labels)
+    
+    example_graph = train_dataset.__getitem__(0)
+    num_extra_features = example_graph.graph_features.shape[-1]
 
     train_loader = DataLoader(
         train_dataset,
@@ -202,11 +199,13 @@ def run(cfg: dict, trial=None):
     encoder_dimension = cfg["model"]["encoder_dimension"]
     num_blocks = cfg["model"]["num_blocks"]
 
-    magik = dl.GraphToGlobalMPM(
+    magik = MagikMPM(
         [encoder_dimension] * num_blocks,
-        out_activation=nn.Softmax(dim=1),
         out_features=num_classes,
-    ).create()
+        out_activation=nn.Softmax(dim=1),
+    )
+
+    magik.head.configure(in_features=encoder_dimension+num_extra_features, out_features=num_classes)
 
     if cfg["training"].get("weighted_loss", False):
         labels = np.array([g.graph_label.item() for g in train_graphs])
@@ -230,14 +229,21 @@ def run(cfg: dict, trial=None):
         import types
         _lr = float(cfg["training"]["lr"])
         _wd = float(cfg["training"]["weight_decay"])
-        _T_0 = int(cfg["training"]["scheduler"].get("T_0", cfg["training"]["num_epochs"] // 3))
-        _T_mult = int(cfg["training"]["scheduler"].get("T_mult", 1))
+        _warmup_epochs = int(cfg["training"]["scheduler"].get("warmup_epochs", 5))
+        _start_factor = float(cfg["training"]["scheduler"].get("start_factor", 0.1))
         _eta_min = float(cfg["training"]["scheduler"].get("eta_min", 0))
+        _num_epochs = int(cfg["training"]["num_epochs"])
 
         def _configure_optimizers(self):
             optimizer = torch.optim.Adam(self.parameters(), lr=_lr, weight_decay=_wd)
-            scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-                optimizer, T_0=_T_0, T_mult=_T_mult, eta_min=_eta_min
+            warmup = torch.optim.lr_scheduler.LinearLR(
+                optimizer, start_factor=_start_factor, end_factor=1.0, total_iters=_warmup_epochs
+            )
+            cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, T_max=max(1, _num_epochs - _warmup_epochs), eta_min=_eta_min
+            )
+            scheduler = torch.optim.lr_scheduler.SequentialLR(
+                optimizer, schedulers=[warmup, cosine], milestones=[_warmup_epochs]
             )
             return [optimizer], [{"scheduler": scheduler, "interval": "epoch"}]
 

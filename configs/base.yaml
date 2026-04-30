@@ -13,7 +13,7 @@ data:
 
 graph:
   max_frame_distance: 3
-  Dt: 80
+  Dt_range: [80, 150]
 
 model:
   encoder_dimension: 96
@@ -25,11 +25,11 @@ training:
   weight_decay: 5e-4
   batch_size: 16
   val_batch_size: 256
-  num_epochs: 30
+  num_epochs: 80
   sample_balanced: true
   weighted_loss: false
-  dataset_size_multiplier: auto           # integer multiplier, or "auto" = total_frames / Dt
-  # scheduler:                            # cosine annealing with warm restarts (remove comment to enable)
-  #   T_0: 10                             # epochs per restart cycle (default: num_epochs // 3)
-  #   T_mult: 1                           # cycle length multiplier after each restart
-  #   eta_min: 5e-5                       # minimum LR at the bottom of each cycle
+  dataset_size_multiplier: 3            # scales sampled trajectories: size = multiplier * total_frames / mean(Dt_range)
+  scheduler:                            # warmup + cosine annealing (remove comment to enable)
+    warmup_epochs: 5                    # linear warmup duration (epochs)
+    start_factor: 0.1                   # initial LR fraction at warmup start (ramps to 1.0)
+    eta_min: 5e-5                       # minimum LR at the end of cosine decay

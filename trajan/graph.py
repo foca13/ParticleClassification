@@ -32,9 +32,7 @@ class GraphFromTrajectories:
     -------
     estimate_connectivity_radius(displacements, sigma_deviation, scaling)
         Estimate a connectivity radius from observed displacements.
-    estimate_trajectory_span_std(df, Dt)
-        Estimate a single position scale from trajectory span data.
-    from_tracks(df, Dt, max_frame_distance, sigma_deviation, scaling)
+    from_tracks(df, max_frame_distance, sigma_deviation, scaling)
         Convenience constructor that estimates parameters from the data.
     get_subgraphs(graph)
         Split a graph into its connected components.
@@ -100,47 +98,10 @@ class GraphFromTrajectories:
         connectivity_radius = np.ceil(upper_displacement / order_of_magnitude) * order_of_magnitude
         return connectivity_radius
 
-    @staticmethod
-    def estimate_trajectory_span_std(df: TracksDataFrame, Dt: int) -> float:
-        """Estimate a single position scale from coordinate spans within Dt-length windows.
-
-        For each particle trajectory, slides a window of length Dt and computes
-        the coordinate range (max - min) along x and y. Treats both axes as
-        samples of the same distribution (since trajectory orientation is
-        arbitrary) and returns their combined standard deviation as a scalar.
-
-        Parameters
-        ----------
-        df : TracksDataFrame
-            Tracking data containing at least "x", "y", "set", "label", "frame".
-        Dt : int
-            Window length in frames.
-
-        Returns
-        -------
-        float
-            Standard deviation of all coordinate spans across both axes and
-            all Dt-length windows.
-        """
-        spans = []
-        for video in df["set"].unique():
-            df_video = df[df["set"] == video]
-            for particle in df_video["label"].unique():
-                particle_data = df_video[df_video["label"] == particle].sort_values("frame")
-                coords = particle_data[["x", "y"]].to_numpy()
-                for i in range(len(coords) - Dt + 1):
-                    span = np.ptp(coords[i:i + Dt], axis=0)
-                    spans.append(span)
-        if not spans:
-            return 1.0
-        spans = np.array(spans)
-        return float(spans.std())
-
     @classmethod
     def from_tracks(
         cls,
         df: TracksDataFrame,
-        Dt: int,
         max_frame_distance: int,
         sigma_deviation: float = 3,
         scaling: float = 1,
@@ -155,9 +116,6 @@ class GraphFromTrajectories:
         ----------
         df : TracksDataFrame
             Tracking data used to estimate parameters.
-        Dt : int
-            Length of the time window in frames, used to estimate the
-            position scale.
         max_frame_distance : int
             Maximum number of frames between two connected detections.
         sigma_deviation : float, optional
@@ -173,8 +131,7 @@ class GraphFromTrajectories:
         """
         displacements = df.compute_displacements()
         connectivity_radius = cls.estimate_connectivity_radius(displacements, sigma_deviation, scaling)
-        trajectory_span_std = cls.estimate_trajectory_span_std(df, Dt)
-        return cls(connectivity_radius=connectivity_radius, max_frame_distance=max_frame_distance), trajectory_span_std
+        return cls(connectivity_radius=connectivity_radius, max_frame_distance=max_frame_distance)
 
     @staticmethod
     def get_subgraphs(graph: Data) -> list[Data]:
@@ -212,9 +169,9 @@ class GraphFromTrajectories:
         same label are connected (used to build ground-truth-only graphs).
 
         Edge features are:
-            - normalised distance (distance / connectivity_radius)
-            - normalised frame gap (frame_gap / max_frame_distance)
-            - a motion energy proxy (distance² / normalised frame gap)
+            - normalized distance (distance / connectivity_radius)
+            - normalized frame gap (frame_gap / max_frame_distance)
+            - a motion energy proxy (distance² / normalized frame gap)
 
         Parameters
         ----------
@@ -350,7 +307,7 @@ class GraphFromTrajectories:
                 - x : node coordinates, shape (N, 2)
                 - edge_index : edge connectivity, shape (2, E)
                 - edge_attr : edge feature vectors, shape (E, 3)
-                - distance : normalised distances, shape (E, 1)
+                - distance : normalized distances, shape (E, 1)
                 - frames : frame indices, shape (N,)
                 - y : ground-truth edge labels, shape (E, 1)
                 - graph_label : graph-level class label, shape ()

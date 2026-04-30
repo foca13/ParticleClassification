@@ -8,11 +8,36 @@ from pathlib import Path
 
 
 def plot_confusion_matrix(cm_df: pd.DataFrame, display_labels: list) -> plt.Figure:
-    """Plot a confusion matrix and return the figure."""
-    fig, ax = plt.subplots()
-    ConfusionMatrixDisplay(
-        confusion_matrix=cm_df.values, display_labels=display_labels
-    ).plot(ax=ax)
+    """Plot raw and normalized confusion matrices side by side.
+
+    Parameters
+    ----------
+    cm_df : pd.DataFrame
+        Confusion matrix as a DataFrame with class labels as index and columns.
+    display_labels : list
+        Class names to display on the axes.
+
+    Returns
+    -------
+    plt.Figure
+        Figure containing raw (counts) and normalized (recall) confusion matrices.
+    """
+    cm = cm_df.values
+    cm_normalized = cm.astype(float) / cm.sum(axis=1, keepdims=True)
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+
+    ConfusionMatrixDisplay(cm, display_labels=display_labels).plot(
+        ax=axes[0], cmap='Blues'
+    )
+    axes[0].set_title('Counts')
+
+    ConfusionMatrixDisplay(cm_normalized, display_labels=display_labels).plot(
+        ax=axes[1], cmap='Blues', values_format='.2f'
+    )
+    axes[1].set_title('normalized')
+
+    plt.tight_layout()
     return fig
 
 
