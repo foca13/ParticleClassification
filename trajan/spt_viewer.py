@@ -24,6 +24,7 @@ from PIL import Image, ImageDraw, ImageTk
 from trajan.data import parse_particle_tree
 
 HAND_CURSOR = "pointinghand" if sys.platform == "darwin" else "hand2"
+SPACING = 0.036
 
 
 # ---------------------------------------------------------------------------
@@ -32,15 +33,15 @@ HAND_CURSOR = "pointinghand" if sys.platform == "darwin" else "hand2"
 
 def load_video(path: str) -> tuple[np.ndarray, float]:
     """Load a .tif video and return (frames, pixel_spacing).
- 
+
     The returned array is always 4D with shape (T, H, W, C) so downstream
     code can treat single- and multi-channel videos uniformly.
- 
+
     Parameters
     ----------
     path : str
         Path to the .tif file.
- 
+
     Returns
     -------
     tuple[np.ndarray, float]
@@ -49,10 +50,10 @@ def load_video(path: str) -> tuple[np.ndarray, float]:
     """
     with tifffile.TiffFile(path) as tif:
         video = tif.asarray()
-        spacing = 1.0
+        spacing = SPACING
         if tif.is_imagej and tif.imagej_metadata:
-            spacing = tif.imagej_metadata.get("spacing", 1.0)
- 
+            spacing = tif.imagej_metadata.get("spacing", SPACING)
+
     # Normalise to (T, H, W, C). Common input shapes:
     #   (H, W)            -> single frame, single channel
     #   (T, H, W)         -> multi-frame, single channel
@@ -69,7 +70,7 @@ def load_video(path: str) -> tuple[np.ndarray, float]:
             video = np.moveaxis(video, 1, -1)  # (T, C, H, W) -> (T, H, W, C)
     else:
         raise ValueError(f"Unsupported video shape: {video.shape}")
- 
+
     return video, float(spacing)
 
 
@@ -101,7 +102,7 @@ def normalise_frame(frame: np.ndarray) -> np.ndarray:
 
 def build_frame_image(
     frame: np.ndarray,
-    tracks: list,
+    dets_by_frame: dict,
     frame_idx: int,
     spacing: float,
     rect_half: int,
@@ -109,7 +110,7 @@ def build_frame_image(
     canvas_h: int,
 ) -> ImageTk.PhotoImage:
     """Render a video frame with particle rectangles overlaid.
- 
+
     Parameters
     ----------
     frame : np.ndarray
@@ -125,14 +126,14 @@ def build_frame_image(
         Half-width of the rectangle in pixels.
     canvas_w, canvas_h : int
         Canvas dimensions for scaling.
- 
+
     Returns
     -------
     ImageTk.PhotoImage
         Rendered image ready for display in a Tk canvas.
     """
     img_h, img_w, n_channels = frame.shape
- 
+
     # Lay channels out horizontally with a small gap between panels.
     gap = 4 if n_channels > 1 else 0
     total_w = img_w * n_channels + gap * (n_channels - 1)
@@ -140,38 +141,36 @@ def build_frame_image(
     panel_w = int(img_w * scale)
     panel_h = int(img_h * scale)
     disp_w = panel_w * n_channels + gap * (n_channels - 1)
- 
+
     # Build the composite image one channel at a time.
     composite = Image.new("RGB", (disp_w, panel_h), (20, 20, 20))
     for c in range(n_channels):
         chan_img = Image.fromarray(normalise_frame(frame[..., c])).convert("RGB")
         chan_img = chan_img.resize((panel_w, panel_h), Image.NEAREST)
         draw = ImageDraw.Draw(chan_img)
- 
+
         # Draw bounding boxes on every panel (alignment check across channels).
-        for particle in tracks:
-            for det in particle:
-                t, x, y = det
-                if int(t) != frame_idx:
-                    continue
-                px = int((x / spacing) * scale)
-                py = int((y / spacing) * scale)
-                r = int(rect_half * scale)
-                draw.rectangle(
-                    [px - r, py - r, px + r, py + r],
-                    outline=(255, 50, 50),
-                    width=max(1, int(scale)),
-                )
- 
+        r = int(rect_half * scale)
+        line_w = max(1, int(scale))
+        for x, y in dets_by_frame.get(frame_idx, []):
+            px = int((x / spacing) * scale)
+            py = int((y / spacing) * scale)
+            draw.rectangle(
+                [px - r, py - r, px + r, py + r],
+                outline=(255, 50, 50),
+                width=line_w,
+            )
+
         composite.paste(chan_img, (c * (panel_w + gap), 0))
- 
+
     # Pad to canvas size and centre.
     padded = Image.new("RGB", (canvas_w, canvas_h), (20, 20, 20))
     offset_x = (canvas_w - disp_w) // 2
     offset_y = (canvas_h - panel_h) // 2
     padded.paste(composite, (offset_x, offset_y))
- 
+
     return ImageTk.PhotoImage(padded)
+
 
 # ---------------------------------------------------------------------------
 # Main application
@@ -192,6 +191,7 @@ class SPTViewer(tk.Tk):
         # State
         self.video: np.ndarray | None = None
         self.tracks: list = []
+        self._dets_by_frame: dict[int, list[tuple[float, float]]] = {}
         self.spacing: float = 1.0
         self.frame_idx: int = 0
         self.playing: bool = False
@@ -218,6 +218,24 @@ class SPTViewer(tk.Tk):
 
         self._make_button(top, "Load .tif", self._load_video).pack(side="left", padx=(10, 4))
         self._make_button(top, "Load XML", self._load_xml).pack(side="left", padx=4)
+
+        # Toggle: ask the user to load a new XML each time a video is loaded.
+        self._ask_xml_var = tk.BooleanVar(value=True)
+        ask_chk = tk.Checkbutton(
+            top,
+            text="Ask for XML on video load",
+            variable=self._ask_xml_var,
+            bg="#1e1e1e",
+            fg="#bbb",
+            activebackground="#1e1e1e",
+            activeforeground="#fff",
+            selectcolor="#1e1e1e",
+            highlightthickness=0,
+            bd=0,
+            font=self.option_add,
+            cursor=HAND_CURSOR,
+        )
+        ask_chk.pack(side="left", padx=(8, 0))
 
         self._file_label = tk.Label(top, text="No files loaded", bg="#1e1e1e",
                                     fg="#e0e0e0", font=self.option_add)
@@ -329,22 +347,53 @@ class SPTViewer(tk.Tk):
             self._frame_var.set(0)
             self.frame_idx = 0
             self._spacing_label.config(text=f"spacing: {self.spacing:.4f}")
+
+            # Clear any previously loaded tracks — they belong to the old video.
             self._update_file_label(tif=Path(path).name)
+
+            n_channels = self.video.shape[-1]
+            ch_str = f", {n_channels} ch" if n_channels > 1 else ""
             self._set_status(f"Loaded {Path(path).name} — {n_frames} frames, "
-                             f"{self.video.shape[1]}×{self.video.shape[2]} px")
+                             f"{self.video.shape[1]}×{self.video.shape[2]} px"
+                             f"{ch_str}")
             self._refresh_frame()
+
+            # Prompt the user to load a matching XML, defaulting to the
+            # directory the video was loaded from. Skipped if the toggle
+            # is unchecked, but tracks are still cleared above either way.
+            if self._ask_xml_var.get():
+                video_dir = str(Path(path).parent)
+                should_load = messagebox.askyesno(
+                    title="Load matching tracks?",
+                    message=(
+                        "The video has changed. The currently loaded tracks "
+                        "no longer apply.\n\nLoad a new XML track file now?"
+                    ),
+                )
+                if should_load:
+                    self._load_xml(initial_dir=video_dir)
         except Exception as e:
             messagebox.showerror("Error loading video", str(e))
 
-    def _load_xml(self):
-        path = filedialog.askopenfilename(
-            title="Select XML track file",
-            filetypes=[("XML files", "*.xml"), ("All files", "*.*")],
-        )
+    def _load_xml(self, initial_dir: str | None = None):
+        kwargs = {
+            "title": "Select XML track file",
+            "filetypes": [("XML files", "*.xml"), ("All files", "*.*")],
+        }
+        if initial_dir:
+            kwargs["initialdir"] = initial_dir
+        path = filedialog.askopenfilename(**kwargs)
         if not path:
             return
         try:
-            self.tracks = load_tracks(path)
+            new_tracks = load_tracks(path)
+            self.tracks = new_tracks
+            # Index detections by frame for O(1) per-frame lookup.
+            self._dets_by_frame: dict[int, list[tuple[float, float]]] = {}
+            for particle in new_tracks:
+                for det in particle:
+                    t, x, y = det
+                    self._dets_by_frame.setdefault(int(t), []).append((x, y))
             self._update_file_label(xml=Path(path).name)
             self._set_status(f"Loaded {Path(path).name} — {len(self.tracks)} tracks")
             self._refresh_frame()
@@ -360,9 +409,10 @@ class SPTViewer(tk.Tk):
                     parts["tif"] = part.split("tif:")[1].strip()
                 elif part.startswith("xml:"):
                     parts["xml"] = part.split("xml:")[1].strip()
-        if tif:
+        # `None` means "leave unchanged"; an empty string means "clear".
+        if tif is not None:
             parts["tif"] = tif
-        if xml:
+        if xml is not None:
             parts["xml"] = xml
         label = " | ".join(f"{k}: {v}" for k, v in parts.items() if v)
         self._file_label.config(text=label, fg="#aaa")
@@ -374,13 +424,12 @@ class SPTViewer(tk.Tk):
     def _refresh_frame(self, *_):
         if self.video is None:
             return
-        self.frame_idx = int(self._frame_var.get())
-        self._frame_label.config(
-            text=f"{self.frame_idx} / {len(self.video) - 1}"
-        )
+        n_frames = len(self.video)
+        self.frame_idx = max(0, min(int(self._frame_var.get()), n_frames - 1))
+        self._frame_label.config(text=f"{self.frame_idx} / {n_frames - 1}")
         photo = build_frame_image(
             frame=self.video[self.frame_idx],
-            tracks=self.tracks,
+            dets_by_frame=self._dets_by_frame,
             frame_idx=self.frame_idx,
             spacing=self.spacing,
             rect_half=self._rect_var.get(),
@@ -433,6 +482,34 @@ class SPTViewer(tk.Tk):
 # Entry point
 # ---------------------------------------------------------------------------
 
+def _filter_macos_button_warnings():
+    """Suppress the cosmetic 'min height of view' Cocoa warnings on macOS.
+
+    These warnings come from native buttons in system-provided dialogs and
+    don't affect functionality. Other stderr output is preserved.
+    """
+    import os
+    import re
+    import threading
+
+    pattern = re.compile(r"Expected min height of view.*NSButton")
+    read_fd, write_fd = os.pipe()
+    real_stderr_fd = os.dup(2)
+    os.dup2(write_fd, 2)
+    os.close(write_fd)
+
+    def _pump():
+        with os.fdopen(read_fd, "rb") as r, os.fdopen(real_stderr_fd, "wb") as w:
+            for line in r:
+                if not pattern.search(line.decode("utf-8", errors="replace")):
+                    w.write(line)
+                    w.flush()
+
+    threading.Thread(target=_pump, daemon=True).start()
+
+
 if __name__ == "__main__":
+    if sys.platform == "darwin":
+        _filter_macos_button_warnings()
     app = SPTViewer()
     app.mainloop()
