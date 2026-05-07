@@ -180,6 +180,8 @@ class SPTViewer(tk.Tk):
         top = tk.Frame(self, bg="#1e1e1e", pady=6)
         top.pack(fill="x", padx=0, pady=0)
 
+        self.option_add("*Font", ("Courier", 14))
+
         btn_style = {"bg": "#2d2d2d", "fg": "#e0e0e0", "relief": "flat",
                      "padx": 12, "pady": 4, "cursor": "hand2",
                      "activebackground": "#3a3a3a", "activeforeground": "#ffffff",
@@ -189,11 +191,11 @@ class SPTViewer(tk.Tk):
         self._make_button(top, "Load XML", self._load_xml).pack(side="left", padx=4)
 
         self._file_label = tk.Label(top, text="No files loaded", bg="#1e1e1e",
-                                    fg="#666", font=("Courier", 9))
+                                    fg="#e0e0e0", font=self.option_add)
         self._file_label.pack(side="left", padx=12)
 
         self._spacing_label = tk.Label(top, text="spacing: —", bg="#1e1e1e",
-                                       fg="#888", font=("Courier", 9))
+                                       fg="#888", font=self.option_add)
         self._spacing_label.pack(side="right", padx=10)
 
         # Canvas
@@ -206,8 +208,8 @@ class SPTViewer(tk.Tk):
         ctrl.pack(fill="x")
 
         # Frame slider
-        tk.Label(ctrl, text="Frame", bg="#1e1e1e", fg="#888",
-                 font=("Courier", 9)).grid(row=0, column=0, padx=(12, 4))
+        tk.Label(ctrl, text="Frame", bg="#1e1e1e", fg="#9F9F9F",
+                 font=self.option_add).grid(row=0, column=0, padx=(12, 4))
 
         self._frame_var = tk.IntVar(value=0)
         self._frame_slider = ttk.Scale(ctrl, from_=0, to=0, orient="horizontal",
@@ -216,36 +218,36 @@ class SPTViewer(tk.Tk):
         self._frame_slider.grid(row=0, column=1, padx=4)
 
         self._frame_label = tk.Label(ctrl, text="0 / 0", bg="#1e1e1e", fg="#ccc",
-                                     font=("Courier", 9), width=8)
+                                     font=self.option_add, width=8)
         self._frame_label.grid(row=0, column=2, padx=4)
 
         # Playback controls
         self._play_btn = tk.Button(ctrl, text="▶ Play", command=self._toggle_play,
-                                   bg="#2d2d2d", fg="#e0e0e0", relief="flat",
+                                   bg="#2d2d2d", fg="#000000", relief="flat",
                                    padx=12, pady=3, cursor="hand2",
-                                   activebackground="#3a3a3a", font=("Courier", 10))
+                                   activebackground="#3a3a3a", font=self.option_add)
         self._play_btn.grid(row=0, column=3, padx=(16, 4))
 
         # FPS
-        tk.Label(ctrl, text="FPS", bg="#1e1e1e", fg="#888",
-                 font=("Courier", 9)).grid(row=0, column=4, padx=(12, 2))
+        tk.Label(ctrl, text="FPS", bg="#1e1e1e", fg="#9F9F9F",
+                 font=self.option_add).grid(row=0, column=4, padx=(12, 2))
         self._fps_var = tk.IntVar(value=10)
         ttk.Spinbox(ctrl, from_=1, to=60, textvariable=self._fps_var,
-                    width=4, font=("Courier", 9)).grid(row=0, column=5, padx=4)
+                    width=4, font=self.option_add).grid(row=0, column=5, padx=4)
 
         # Rectangle size
-        tk.Label(ctrl, text="Rect px", bg="#1e1e1e", fg="#888",
-                 font=("Courier", 9)).grid(row=0, column=6, padx=(16, 2))
+        tk.Label(ctrl, text="Rect px", bg="#1e1e1e", fg="#9F9F9F",
+                 font=self.option_add).grid(row=0, column=6, padx=(16, 2))
         self._rect_var = tk.IntVar(value=18)
         rect_spin = ttk.Spinbox(ctrl, from_=1, to=100, textvariable=self._rect_var,
-                                width=4, font=("Courier", 9),
+                                width=4, font=self.option_add,
                                 command=self._refresh_frame)
         rect_spin.grid(row=0, column=7, padx=4)
         rect_spin.bind("<Return>", lambda e: self._refresh_frame())
 
         # Status bar
         self._status = tk.Label(self, text="Load a .tif and an XML file to begin.",
-                                bg="#0e0e0e", fg="#555", font=("Courier", 8),
+                                bg="#0e0e0e", fg="#555", font=self.option_add,
                                 anchor="w", padx=10)
         self._status.pack(fill="x", side="bottom")
 
@@ -266,11 +268,11 @@ class SPTViewer(tk.Tk):
             text=text,
             command=command,
             bg="#2a2a2a",
-            fg="#ffffff",
+            fg="#030303",
             relief="flat",
             padx=16,
             pady=8,
-            font=("Courier", 11, "bold"),
+            font=self.option_add,
             cursor=HAND_CURSOR,
             activebackground="#444444",
             activeforeground="#ffffff",
