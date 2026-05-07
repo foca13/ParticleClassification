@@ -1,0 +1,407 @@
+"""
+SPT Viewer — Single Particle Tracking visualiser.
+
+Loads a .tif video and an XML file containing particle tracks,
+displays the video frame by frame with particle rectangles overlaid,
+and allows interactive control of frame, playback speed, and rectangle size.
+
+Usage
+-----
+    python scripts/spt_viewer.py
+"""
+import sys
+import threading
+import time
+import tkinter as tk
+import xml.etree.ElementTree as ET
+from pathlib import Path
+from tkinter import filedialog, messagebox, ttk
+
+import numpy as np
+import tifffile
+from PIL import Image, ImageDraw, ImageTk
+
+from trajan.data import parse_particle_tree
+
+HAND_CURSOR = "pointinghand" if sys.platform == "darwin" else "hand2"
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def load_video(path: str) -> tuple[np.ndarray, float]:
+    """Load a .tif video and return (frames, pixel_spacing).
+
+    Parameters
+    ----------
+    path : str
+        Path to the .tif file.
+
+    Returns
+    -------
+    tuple[np.ndarray, float]
+        Array of shape (T, H, W) and pixel spacing in physical units.
+        Spacing defaults to 1.0 if not found in metadata.
+    """
+    with tifffile.TiffFile(path) as tif:
+        video = tif.asarray()
+        spacing = 1.0
+        if tif.is_imagej and tif.imagej_metadata:
+            spacing = tif.imagej_metadata.get("spacing", 1.0)
+    if video.ndim == 2:
+        video = video[np.newaxis]
+    return video, float(spacing)
+
+
+def load_tracks(path: str) -> list:
+    """Load particle tracks from an XML file.
+
+    Parameters
+    ----------
+    path : str
+        Path to the XML file.
+
+    Returns
+    -------
+    list
+        List of particle trajectories as returned by parse_particle_tree.
+    """
+    tree = ET.parse(path)
+    return parse_particle_tree(tree)
+
+
+def normalise_frame(frame: np.ndarray) -> np.ndarray:
+    """Normalise a single frame to uint8 for display."""
+    f = frame.astype(np.float32)
+    lo, hi = f.min(), f.max()
+    if hi > lo:
+        f = (f - lo) / (hi - lo) * 255
+    return f.astype(np.uint8)
+
+
+def build_frame_image(
+    frame: np.ndarray,
+    tracks: list,
+    frame_idx: int,
+    spacing: float,
+    rect_half: int,
+    canvas_w: int,
+    canvas_h: int,
+) -> ImageTk.PhotoImage:
+    """Render a video frame with particle rectangles overlaid.
+
+    Parameters
+    ----------
+    frame : np.ndarray
+        2D array of pixel values for this frame.
+    tracks : list
+        Particle trajectories from parse_particle_tree.
+    frame_idx : int
+        Current frame index, used to look up particle positions.
+    spacing : float
+        Pixel spacing to convert physical coordinates to pixels.
+    rect_half : int
+        Half-width of the rectangle in pixels.
+    canvas_w, canvas_h : int
+        Canvas dimensions for scaling.
+
+    Returns
+    -------
+    ImageTk.PhotoImage
+        Rendered image ready for display in a Tk canvas.
+    """
+    img_h, img_w = frame.shape
+    scale = min(canvas_w / img_w, canvas_h / img_h)
+    disp_w = int(img_w * scale)
+    disp_h = int(img_h * scale)
+
+    pil_img = Image.fromarray(normalise_frame(frame)).convert("RGB")
+    pil_img = pil_img.resize((disp_w, disp_h), Image.NEAREST)
+    draw = ImageDraw.Draw(pil_img)
+
+    for particle in tracks:
+        for det in particle:
+            t, x, y = det
+            if int(t) != frame_idx:
+                continue
+            # Convert physical coords to pixel coords, then scale to display
+            px = int((x / spacing) * scale)
+            py = int((y / spacing) * scale)
+            r = int(rect_half * scale)
+            draw.rectangle(
+                [px - r, py - r, px + r, py + r],
+                outline=(255, 50, 50),
+                width=max(1, int(scale)),
+            )
+
+    # Pad to canvas size
+    padded = Image.new("RGB", (canvas_w, canvas_h), (20, 20, 20))
+    offset_x = (canvas_w - disp_w) // 2
+    offset_y = (canvas_h - disp_h) // 2
+    padded.paste(pil_img, (offset_x, offset_y))
+
+    return ImageTk.PhotoImage(padded)
+
+
+# ---------------------------------------------------------------------------
+# Main application
+# ---------------------------------------------------------------------------
+
+class SPTViewer(tk.Tk):
+    """Single Particle Tracking viewer application."""
+
+    CANVAS_W = 800
+    CANVAS_H = 600
+
+    def __init__(self):
+        super().__init__()
+        self.title("SPT Viewer")
+        self.resizable(False, False)
+        self.configure(bg="#141414")
+
+        # State
+        self.video: np.ndarray | None = None
+        self.tracks: list = []
+        self.spacing: float = 1.0
+        self.frame_idx: int = 0
+        self.playing: bool = False
+        self._play_thread: threading.Thread | None = None
+        self._photo: ImageTk.PhotoImage | None = None
+
+        self._build_ui()
+
+    # ------------------------------------------------------------------
+    # UI construction
+    # ------------------------------------------------------------------
+
+    def _build_ui(self):
+        # Top bar — file loading
+        top = tk.Frame(self, bg="#1e1e1e", pady=6)
+        top.pack(fill="x", padx=0, pady=0)
+
+        btn_style = {"bg": "#2d2d2d", "fg": "#e0e0e0", "relief": "flat",
+                     "padx": 12, "pady": 4, "cursor": "hand2",
+                     "activebackground": "#3a3a3a", "activeforeground": "#ffffff",
+                     "font": ("Courier", 10)}
+
+        self._make_button(top, "Load .tif", self._load_video).pack(side="left", padx=(10, 4))
+        self._make_button(top, "Load XML", self._load_xml).pack(side="left", padx=4)
+
+        self._file_label = tk.Label(top, text="No files loaded", bg="#1e1e1e",
+                                    fg="#666", font=("Courier", 9))
+        self._file_label.pack(side="left", padx=12)
+
+        self._spacing_label = tk.Label(top, text="spacing: —", bg="#1e1e1e",
+                                       fg="#888", font=("Courier", 9))
+        self._spacing_label.pack(side="right", padx=10)
+
+        # Canvas
+        self._canvas = tk.Canvas(self, width=self.CANVAS_W, height=self.CANVAS_H,
+                                 bg="#141414", highlightthickness=0)
+        self._canvas.pack(padx=0, pady=0)
+
+        # Controls bar
+        ctrl = tk.Frame(self, bg="#1e1e1e", pady=8)
+        ctrl.pack(fill="x")
+
+        # Frame slider
+        tk.Label(ctrl, text="Frame", bg="#1e1e1e", fg="#888",
+                 font=("Courier", 9)).grid(row=0, column=0, padx=(12, 4))
+
+        self._frame_var = tk.IntVar(value=0)
+        self._frame_slider = ttk.Scale(ctrl, from_=0, to=0, orient="horizontal",
+                                       variable=self._frame_var, length=340,
+                                       command=self._on_frame_slide)
+        self._frame_slider.grid(row=0, column=1, padx=4)
+
+        self._frame_label = tk.Label(ctrl, text="0 / 0", bg="#1e1e1e", fg="#ccc",
+                                     font=("Courier", 9), width=8)
+        self._frame_label.grid(row=0, column=2, padx=4)
+
+        # Playback controls
+        self._play_btn = tk.Button(ctrl, text="▶ Play", command=self._toggle_play,
+                                   bg="#2d2d2d", fg="#e0e0e0", relief="flat",
+                                   padx=12, pady=3, cursor="hand2",
+                                   activebackground="#3a3a3a", font=("Courier", 10))
+        self._play_btn.grid(row=0, column=3, padx=(16, 4))
+
+        # FPS
+        tk.Label(ctrl, text="FPS", bg="#1e1e1e", fg="#888",
+                 font=("Courier", 9)).grid(row=0, column=4, padx=(12, 2))
+        self._fps_var = tk.IntVar(value=10)
+        ttk.Spinbox(ctrl, from_=1, to=60, textvariable=self._fps_var,
+                    width=4, font=("Courier", 9)).grid(row=0, column=5, padx=4)
+
+        # Rectangle size
+        tk.Label(ctrl, text="Rect px", bg="#1e1e1e", fg="#888",
+                 font=("Courier", 9)).grid(row=0, column=6, padx=(16, 2))
+        self._rect_var = tk.IntVar(value=18)
+        rect_spin = ttk.Spinbox(ctrl, from_=1, to=100, textvariable=self._rect_var,
+                                width=4, font=("Courier", 9),
+                                command=self._refresh_frame)
+        rect_spin.grid(row=0, column=7, padx=4)
+        rect_spin.bind("<Return>", lambda e: self._refresh_frame())
+
+        # Status bar
+        self._status = tk.Label(self, text="Load a .tif and an XML file to begin.",
+                                bg="#0e0e0e", fg="#555", font=("Courier", 8),
+                                anchor="w", padx=10)
+        self._status.pack(fill="x", side="bottom")
+
+        self._style_ttk()
+
+    def _style_ttk(self):
+        style = ttk.Style(self)
+        style.theme_use("clam")
+        style.configure("TScale", background="#1e1e1e", troughcolor="#2d2d2d",
+                        slidercolor="#555")
+        style.configure("TSpinbox", fieldbackground="#2d2d2d", background="#2d2d2d",
+                        foreground="#e0e0e0", arrowcolor="#888",
+                        bordercolor="#333", lightcolor="#333")
+
+    def _make_button(self, parent, text, command):
+        btn = tk.Button(
+            parent,
+            text=text,
+            command=command,
+            bg="#2a2a2a",
+            fg="#ffffff",
+            relief="flat",
+            padx=16,
+            pady=8,
+            font=("Courier", 11, "bold"),
+            cursor=HAND_CURSOR,
+            activebackground="#444444",
+            activeforeground="#ffffff",
+            borderwidth=0,
+        )
+        btn.bind("<Enter>", lambda e: btn.config(bg="#3a3a3a"))
+        btn.bind("<Leave>", lambda e: btn.config(bg="#2a2a2a"))
+        return btn
+
+    # ------------------------------------------------------------------
+    # File loading
+    # ------------------------------------------------------------------
+    def _load_video(self):
+        path = filedialog.askopenfilename(
+            title="Select .tif video",
+            filetypes=[("TIFF files", "*.tif *.tiff"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            self._set_status(f"Loading {Path(path).name}…")
+            self.video, self.spacing = load_video(path)
+            n_frames = len(self.video)
+            self._frame_slider.configure(to=n_frames - 1)
+            self._frame_var.set(0)
+            self.frame_idx = 0
+            self._spacing_label.config(text=f"spacing: {self.spacing:.4f}")
+            self._update_file_label(tif=Path(path).name)
+            self._set_status(f"Loaded {Path(path).name} — {n_frames} frames, "
+                             f"{self.video.shape[1]}×{self.video.shape[2]} px")
+            self._refresh_frame()
+        except Exception as e:
+            messagebox.showerror("Error loading video", str(e))
+
+    def _load_xml(self):
+        path = filedialog.askopenfilename(
+            title="Select XML track file",
+            filetypes=[("XML files", "*.xml"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            self.tracks = load_tracks(path)
+            self._update_file_label(xml=Path(path).name)
+            self._set_status(f"Loaded {Path(path).name} — {len(self.tracks)} tracks")
+            self._refresh_frame()
+        except Exception as e:
+            messagebox.showerror("Error loading XML", str(e))
+
+    def _update_file_label(self, tif: str = None, xml: str = None):
+        current = self._file_label.cget("text")
+        parts = {"tif": "", "xml": ""}
+        if "tif:" in current:
+            for part in current.split(" | "):
+                if part.startswith("tif:"):
+                    parts["tif"] = part.split("tif:")[1].strip()
+                elif part.startswith("xml:"):
+                    parts["xml"] = part.split("xml:")[1].strip()
+        if tif:
+            parts["tif"] = tif
+        if xml:
+            parts["xml"] = xml
+        label = " | ".join(f"{k}: {v}" for k, v in parts.items() if v)
+        self._file_label.config(text=label, fg="#aaa")
+
+    # ------------------------------------------------------------------
+    # Rendering
+    # ------------------------------------------------------------------
+
+    def _refresh_frame(self, *_):
+        if self.video is None:
+            return
+        self.frame_idx = int(self._frame_var.get())
+        self._frame_label.config(
+            text=f"{self.frame_idx} / {len(self.video) - 1}"
+        )
+        photo = build_frame_image(
+            frame=self.video[self.frame_idx],
+            tracks=self.tracks,
+            frame_idx=self.frame_idx,
+            spacing=self.spacing,
+            rect_half=self._rect_var.get(),
+            canvas_w=self.CANVAS_W,
+            canvas_h=self.CANVAS_H,
+        )
+        self._photo = photo
+        self._canvas.delete("all")
+        self._canvas.create_image(0, 0, anchor="nw", image=photo)
+
+    def _on_frame_slide(self, val):
+        self._refresh_frame()
+
+    # ------------------------------------------------------------------
+    # Playback
+    # ------------------------------------------------------------------
+
+    def _toggle_play(self):
+        if self.playing:
+            self.playing = False
+            self._play_btn.config(text="▶ Play")
+        else:
+            self.playing = True
+            self._play_btn.config(text="⏸ Pause")
+            self._play_thread = threading.Thread(target=self._play_loop, daemon=True)
+            self._play_thread.start()
+
+    def _play_loop(self):
+        while self.playing:
+            if self.video is None:
+                break
+            next_frame = (self.frame_idx + 1) % len(self.video)
+            self._frame_var.set(next_frame)
+            self.after(0, self._refresh_frame)
+            fps = max(1, self._fps_var.get())
+            time.sleep(1.0 / fps)
+        self.playing = False
+        self.after(0, lambda: self._play_btn.config(text="▶ Play"))
+
+    # ------------------------------------------------------------------
+    # Status
+    # ------------------------------------------------------------------
+
+    def _set_status(self, msg: str):
+        self._status.config(text=msg)
+        self.update_idletasks()
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    app = SPTViewer()
+    app.mainloop()
