@@ -32,16 +32,19 @@ HAND_CURSOR = "pointinghand" if sys.platform == "darwin" else "hand2"
 
 def load_video(path: str) -> tuple[np.ndarray, float]:
     """Load a .tif video and return (frames, pixel_spacing).
-
+ 
+    The returned array is always 4D with shape (T, H, W, C) so downstream
+    code can treat single- and multi-channel videos uniformly.
+ 
     Parameters
     ----------
     path : str
         Path to the .tif file.
-
+ 
     Returns
     -------
     tuple[np.ndarray, float]
-        Array of shape (T, H, W) and pixel spacing in physical units.
+        Array of shape (T, H, W, C) and pixel spacing in physical units.
         Spacing defaults to 1.0 if not found in metadata.
     """
     with tifffile.TiffFile(path) as tif:
@@ -49,8 +52,24 @@ def load_video(path: str) -> tuple[np.ndarray, float]:
         spacing = 1.0
         if tif.is_imagej and tif.imagej_metadata:
             spacing = tif.imagej_metadata.get("spacing", 1.0)
+ 
+    # Normalise to (T, H, W, C). Common input shapes:
+    #   (H, W)            -> single frame, single channel
+    #   (T, H, W)         -> multi-frame, single channel
+    #   (T, C, H, W)      -> multi-frame, multi-channel (ImageJ-style)
+    #   (T, H, W, C)      -> multi-frame, multi-channel (channels-last)
     if video.ndim == 2:
-        video = video[np.newaxis]
+        video = video[np.newaxis, :, :, np.newaxis]
+    elif video.ndim == 3:
+        video = video[..., np.newaxis]
+    elif video.ndim == 4:
+        # Heuristic: a small leading non-time axis is the channel axis.
+        # Real channel counts are tiny (typically 2–4); H and W are much larger.
+        if video.shape[1] <= 4 and video.shape[1] < video.shape[-1]:
+            video = np.moveaxis(video, 1, -1)  # (T, C, H, W) -> (T, H, W, C)
+    else:
+        raise ValueError(f"Unsupported video shape: {video.shape}")
+ 
     return video, float(spacing)
 
 
@@ -90,11 +109,12 @@ def build_frame_image(
     canvas_h: int,
 ) -> ImageTk.PhotoImage:
     """Render a video frame with particle rectangles overlaid.
-
+ 
     Parameters
     ----------
     frame : np.ndarray
-        2D array of pixel values for this frame.
+        Frame array of shape (H, W, C). Each channel is rendered as a
+        grayscale panel; multiple channels are placed side by side.
     tracks : list
         Particle trajectories from parse_particle_tree.
     frame_idx : int
@@ -105,44 +125,53 @@ def build_frame_image(
         Half-width of the rectangle in pixels.
     canvas_w, canvas_h : int
         Canvas dimensions for scaling.
-
+ 
     Returns
     -------
     ImageTk.PhotoImage
         Rendered image ready for display in a Tk canvas.
     """
-    img_h, img_w = frame.shape
-    scale = min(canvas_w / img_w, canvas_h / img_h)
-    disp_w = int(img_w * scale)
-    disp_h = int(img_h * scale)
-
-    pil_img = Image.fromarray(normalise_frame(frame)).convert("RGB")
-    pil_img = pil_img.resize((disp_w, disp_h), Image.NEAREST)
-    draw = ImageDraw.Draw(pil_img)
-
-    for particle in tracks:
-        for det in particle:
-            t, x, y = det
-            if int(t) != frame_idx:
-                continue
-            # Convert physical coords to pixel coords, then scale to display
-            px = int((x / spacing) * scale)
-            py = int((y / spacing) * scale)
-            r = int(rect_half * scale)
-            draw.rectangle(
-                [px - r, py - r, px + r, py + r],
-                outline=(255, 50, 50),
-                width=max(1, int(scale)),
-            )
-
-    # Pad to canvas size
+    img_h, img_w, n_channels = frame.shape
+ 
+    # Lay channels out horizontally with a small gap between panels.
+    gap = 4 if n_channels > 1 else 0
+    total_w = img_w * n_channels + gap * (n_channels - 1)
+    scale = min(canvas_w / total_w, canvas_h / img_h)
+    panel_w = int(img_w * scale)
+    panel_h = int(img_h * scale)
+    disp_w = panel_w * n_channels + gap * (n_channels - 1)
+ 
+    # Build the composite image one channel at a time.
+    composite = Image.new("RGB", (disp_w, panel_h), (20, 20, 20))
+    for c in range(n_channels):
+        chan_img = Image.fromarray(normalise_frame(frame[..., c])).convert("RGB")
+        chan_img = chan_img.resize((panel_w, panel_h), Image.NEAREST)
+        draw = ImageDraw.Draw(chan_img)
+ 
+        # Draw bounding boxes on every panel (alignment check across channels).
+        for particle in tracks:
+            for det in particle:
+                t, x, y = det
+                if int(t) != frame_idx:
+                    continue
+                px = int((x / spacing) * scale)
+                py = int((y / spacing) * scale)
+                r = int(rect_half * scale)
+                draw.rectangle(
+                    [px - r, py - r, px + r, py + r],
+                    outline=(255, 50, 50),
+                    width=max(1, int(scale)),
+                )
+ 
+        composite.paste(chan_img, (c * (panel_w + gap), 0))
+ 
+    # Pad to canvas size and centre.
     padded = Image.new("RGB", (canvas_w, canvas_h), (20, 20, 20))
     offset_x = (canvas_w - disp_w) // 2
-    offset_y = (canvas_h - disp_h) // 2
-    padded.paste(pil_img, (offset_x, offset_y))
-
+    offset_y = (canvas_h - panel_h) // 2
+    padded.paste(composite, (offset_x, offset_y))
+ 
     return ImageTk.PhotoImage(padded)
-
 
 # ---------------------------------------------------------------------------
 # Main application
