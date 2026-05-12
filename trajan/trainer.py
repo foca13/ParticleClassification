@@ -113,8 +113,9 @@ def run(cfg: dict, trial=None):
     # -------------------------------------------------------------------------
     # Data
     # -------------------------------------------------------------------------
+    frame_rate = cfg["data"]["frame_rate"]
     data = pd.read_csv(cfg["data"]["path"], skiprows=1)
-    data = TracksDataFrame(data, frame_rate=cfg["data"]["frame_rate"])
+    data = TracksDataFrame(data, frame_rate=frame_rate)
 
     data_description = data.describe_tracks()
     display_labels = data_description["particle_types"]
@@ -142,10 +143,10 @@ def run(cfg: dict, trial=None):
     # Graphs
     # -------------------------------------------------------------------------
     Dt_range = cfg["graph"]["Dt_range"]
-    max_frame_distance = cfg["graph"]["max_frame_distance"]
+    max_frame_gap = cfg["graph"]["max_frame_gap"]
 
-    graph_builder, position_std = GraphFromTrajectories.from_tracks(
-        train_data, Dt_range[0], max_frame_distance
+    graph_builder, velocity_std = GraphFromTrajectories.from_tracks(
+        train_data, max_frame_gap, frame_rate=frame_rate
     )
 
     train_graphs = graph_builder(train_data, target_column="type", split_tracks=True)
@@ -164,8 +165,7 @@ def run(cfg: dict, trial=None):
         train_graphs,
         Dt_range,
         train_dataset_size,
-        position_std=position_std,
-        connectivity_radius=graph_builder.connectivity_radius,
+        velocity_std=velocity_std,
         transform=transform,
         target="global",
         sample_balanced=cfg["training"]["sample_balanced"],
@@ -174,8 +174,7 @@ def run(cfg: dict, trial=None):
         val_graphs,
         Dt_range,
         val_dataset_size,
-        position_std=position_std,
-        connectivity_radius=graph_builder.connectivity_radius,
+        velocity_std=velocity_std,
         target="global",
     )
 
