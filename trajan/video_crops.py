@@ -21,10 +21,9 @@ import xml.etree.ElementTree as ET
 from typing import Optional
 
 import numpy as np
-import pandas as pd
 import tifffile
 
-from trajan.data import parse_particle_tree
+from trajan.data import TracksDataFrame, parse_particle_tree
 
 _SPACING = 0.036   # default µm / pixel (matches SPT viewer constant)
 _CROP_SIZE = 24    # output crop side length in pixels
@@ -158,8 +157,9 @@ def _extract_crop(
 def build_video_crops_dataset(
     base_dir: pathlib.Path,
     crop_size: int = _CROP_SIZE,
+    frame_rate: Optional[float] = None,
     verbose: bool = True,
-) -> tuple[pd.DataFrame, np.ndarray]:
+) -> tuple[TracksDataFrame, np.ndarray]:
     """Build a track + video-crop dataset from all cytoplasmic recordings.
 
     Walks ``base_dir`` looking for the three class directories defined in
@@ -173,12 +173,15 @@ def build_video_crops_dataset(
         Root directory containing the three class sub-directories.
     crop_size : int
         Side length of each square crop in pixels. Default 24 → 24×24 crops.
+    frame_rate : float, optional
+        Recording frame rate in Hz. Stored in the returned ``TracksDataFrame``
+        and persisted when saving with :meth:`TracksDataFrame.save_npz`.
     verbose : bool
         Print one line per recording showing counts.
 
     Returns
     -------
-    df : pd.DataFrame
+    df : TracksDataFrame
         Columns: x, y, frame, label, set, type, crop_idx.
         ``crop_idx`` is the row index into ``crops``.
     crops : np.ndarray
@@ -277,7 +280,7 @@ def build_video_crops_dataset(
                 )
             set_id += 1
 
-    df = pd.DataFrame(rows)
+    df = TracksDataFrame(rows, frame_rate=frame_rate)
     if crops:
         raw = np.stack(crops).astype(np.float32)
         # Sort to match tracks.csv ordering: set → label → frame

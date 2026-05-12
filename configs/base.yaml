@@ -6,12 +6,15 @@ data:
   path: "data/cytoplasmic/tracks.csv"
   frame_rate: 10
   test_size: 0.25
+  mode: "video"                          # "graph" (trajectories only) or "video" (trajectories + ROCS crops)
+  video_path: "data/cytoplasmic/video_crops/video_crops_24.npz"  # only used when mode: video; produced by scripts/build_video_dataset.py --crop-size 24 --frame-rate 10
   # val_tracks:                           # manual validation split (overrides test_size/seed)
   #   endosome: [2, 3, 10, 12]
   #   golgi: [0, 1]
   #   postgolgi: [1, 4, 7]
 
 graph:
+  node_features: "position"             # "velocity" (vx,vy nodes) or "position" (x,y nodes)
   max_frame_gap: 3
   Dt_range: [50, 120]
 
@@ -19,6 +22,10 @@ model:
   encoder_dimension: 96
   num_blocks: 4
   num_classes: 3
+  cnn:                                     # only used when mode: video
+    channels: [8, 16, 32]                  # output channels per conv block (depth = len(channels))
+    kernel_size: 3                         # conv kernel size for all layers
+    fusion: "add"                          # "add" (element-wise) | "cat" (concat + projection)
 
 training:
   lr: 1e-4
@@ -28,7 +35,7 @@ training:
   num_epochs: 30
   sample_balanced: true
   weighted_loss: false
-  dataset_size_multiplier: 3            # scales sampled trajectories: size = multiplier * total_frames / mean(Dt_range)
+  dataset_size_multiplier: 2            # scales sampled trajectories: size = multiplier * total_frames / mean(Dt_range)
   scheduler:                            # warmup + cosine annealing (remove comment to enable)
     warmup_epochs: 5                    # linear warmup duration (epochs)
     start_factor: 0.1                   # initial LR fraction at warmup start (ramps to 1.0)

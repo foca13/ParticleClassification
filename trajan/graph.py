@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from typing import Optional
 
 import numpy as np
@@ -10,7 +12,18 @@ from torch_geometric.utils import to_scipy_sparse_matrix
 from .data import TracksDataFrame
 
 
-class GraphFromTrajectories:
+def get_subgraphs(graph: Data) -> list[Data]:
+    """Split a PyG Data object into its connected components."""
+    adj = to_scipy_sparse_matrix(graph.edge_index, num_nodes=graph.num_nodes)
+    num_components, component = sp.csgraph.connected_components(adj, directed=False)
+    subgraphs = []
+    for c in range(num_components):
+        mask = torch.from_numpy(component == c).to(graph.edge_index.device, torch.bool)
+        subgraphs.append(graph.subgraph(mask))
+    return subgraphs
+
+
+class VelocityGraphFromTrajectories:
     """Graph representation of particle trajectories using velocity nodes.
 
     Each node is a velocity step (vx, vy) computed between two consecutive
@@ -35,8 +48,6 @@ class GraphFromTrajectories:
         Estimate a velocity-difference threshold from observed increments.
     from_tracks(df, max_frame_gap, sigma_deviation, frame_rate)
         Convenience constructor that estimates parameters from training data.
-    get_subgraphs(graph)
-        Split a graph into its connected components.
     get_connectivity(velocities, frame_indices, labels)
         Compute candidate edges and edge features between velocity nodes.
     get_gt_connectivity(labels, step_indices, edge_index)
@@ -62,9 +73,10 @@ class GraphFromTrajectories:
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Compute velocity nodes from per-particle position sequences.
 
-        For each particle with N detections, produces N-1 velocity vectors.
-        Each velocity node is assigned the frame of its later detection and a
-        0-based step index within the particle's trajectory.
+        For each particle with N detections, produces N-1 velocity vectors
+        (vx, vy) — signed, not magnitudes. Each velocity node is assigned the
+        frame of its later detection and a 0-based step index within the
+        particle's trajectory.
 
         Returns
         -------
@@ -130,7 +142,7 @@ class GraphFromTrajectories:
         max_frame_gap: int,
         frame_rate: float = 1.0,
         sigma_deviation: float = 3,
-    ) -> tuple["GraphFromTrajectories", float]:
+    ) -> tuple["VelocityGraphFromTrajectories", float]:
         """Convenience constructor that estimates parameters from training data.
 
         Collects all frame-to-frame velocity changes across every trajectory,
@@ -150,7 +162,7 @@ class GraphFromTrajectories:
 
         Returns
         -------
-        tuple[GraphFromTrajectories, float]
+        tuple[VelocityGraphFromTrajectories, float]
             The instantiated graph builder and the std of velocity increments.
         """
         all_velocity_changes = []
@@ -183,28 +195,6 @@ class GraphFromTrajectories:
             max_frame_gap=max_frame_gap,
             frame_rate=frame_rate,
         ), velocity_std
-
-    @staticmethod
-    def get_subgraphs(graph: Data) -> list[Data]:
-        """Split a graph into its connected components.
-
-        Parameters
-        ----------
-        graph : Data
-            A PyG Data object to split.
-
-        Returns
-        -------
-        list[Data]
-            A list of PyG Data objects, one per connected component.
-        """
-        adj = to_scipy_sparse_matrix(graph.edge_index, num_nodes=graph.num_nodes)
-        num_components, component = sp.csgraph.connected_components(adj, directed=False)
-        subgraphs = []
-        for c in range(num_components):
-            mask = torch.from_numpy(component == c).to(graph.edge_index.device, torch.bool)
-            subgraphs.append(graph.subgraph(mask))
-        return subgraphs
 
     def get_connectivity(
         self,
@@ -399,7 +389,202 @@ class GraphFromTrajectories:
             )
 
             if split_tracks:
-                graph_dataset += self.get_subgraphs(graph)
+                graph_dataset += get_subgraphs(graph)
+            else:
+                graph_dataset.append(graph)
+
+        return graph_dataset
+
+
+# ---------------------------------------------------------------------------
+# Position-based graph builder (pre-"major feature calculation update")
+# ---------------------------------------------------------------------------
+
+class PositionGraphFromTrajectories:
+    """Graph representation of particle trajectories using position nodes.
+
+    Each node is a raw detection at (x, y). Edges connect detections within
+    a spatial radius and a maximum frame gap. This is the representation used
+    before the velocity-based rewrite.
+
+    Edge features (3):
+        - normalised distance  : distance / connectivity_radius
+        - normalised frame gap : frame_gap / max_frame_gap
+        - motion energy proxy  : (norm_distance)² / norm_frame_gap
+
+    Parameters
+    ----------
+    connectivity_radius : float
+        Maximum spatial distance for an edge to be created.
+    max_frame_gap : int
+        Maximum frame gap for an edge to be created.
+    """
+
+    def __init__(self, connectivity_radius: float, max_frame_gap: int) -> None:
+        self.connectivity_radius = connectivity_radius
+        self.max_frame_gap = max_frame_gap
+
+    @staticmethod
+    def estimate_connectivity_radius(
+        displacements: np.ndarray,
+        sigma_deviation: float = 3,
+        scaling: float = 1,
+    ) -> float:
+        upper = scaling * (np.mean(displacements) + sigma_deviation * np.std(displacements))
+        order = 10 ** np.floor(np.log10(upper))
+        return float(np.ceil(upper / order) * order)
+
+    @classmethod
+    def from_tracks(
+        cls,
+        df: TracksDataFrame,
+        max_frame_gap: int,
+        sigma_deviation: float = 3,
+        scaling: float = 1,
+    ) -> "PositionGraphFromTrajectories":
+        """Estimate connectivity radius from training data and return the builder.
+
+        Per-step displacement magnitudes are computed internally from the
+        training set to estimate the connectivity radius. Normalisation of
+        position node features is handled per-subgraph inside
+        ``PositionGraphDataset``, so no global std is returned here.
+
+        Parameters
+        ----------
+        df : TracksDataFrame
+            Training tracking data.
+        max_frame_gap : int
+            Maximum frame gap for an edge to be created.
+        sigma_deviation : float, optional
+            Passed to estimate_connectivity_radius. Default is 3.
+        scaling : float, optional
+            Passed to estimate_connectivity_radius. Default is 1.
+
+        Returns
+        -------
+        PositionGraphFromTrajectories
+        """
+        displacements = []
+        for video in df["set"].unique():
+            video_data = df[df["set"] == video]
+            for particle in video_data["label"].unique():
+                p = video_data[video_data["label"] == particle].sort_values("frame")
+                frames_arr = p["frame"].to_numpy()
+                coords = p[["x", "y"]].to_numpy()
+                gaps = np.where(np.diff(frames_arr) > 1)[0]
+                for section in np.split(coords, gaps + 1):
+                    if len(section) >= 2:
+                        displacements.extend(np.linalg.norm(np.diff(section, axis=0), axis=1))
+        displacements = np.array(displacements) if displacements else np.array([1.0])
+        connectivity_radius = cls.estimate_connectivity_radius(displacements, sigma_deviation, scaling)
+        return cls(connectivity_radius=connectivity_radius, max_frame_gap=max_frame_gap)
+
+    def get_connectivity(
+        self,
+        positions: np.ndarray,
+        frame_indices: np.ndarray,
+        labels: Optional[np.ndarray] = None,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        edges, edge_features = [], []
+        N = len(positions)
+
+        for i in range(N):
+            for j in range(i + 1, N):
+                frame_gap = int(frame_indices[j] - frame_indices[i])
+                if frame_gap <= 0:
+                    continue
+                if frame_gap > self.max_frame_gap:
+                    break
+                if labels is not None and labels[j] != labels[i]:
+                    continue
+                distance = float(np.linalg.norm(positions[i] - positions[j]))
+                if distance >= self.connectivity_radius:
+                    continue
+                norm_dist = distance / self.connectivity_radius
+                norm_gap = frame_gap / self.max_frame_gap
+                edges.append([i, j])
+                edge_features.append([norm_dist, norm_gap, (norm_dist ** 2) / norm_gap])
+
+        if not edges:
+            return np.zeros((0, 2), dtype=np.int64), np.zeros((0, 3), dtype=np.float32)
+        return np.array(edges, dtype=np.int64), np.array(edge_features, dtype=np.float32)
+
+    def get_gt_connectivity(
+        self,
+        labels: np.ndarray,
+        edge_index: np.ndarray,
+        frames: np.ndarray,
+    ) -> np.ndarray:
+        if len(edge_index) == 0:
+            return np.zeros(0, dtype=bool)
+        src, tgt = edge_index[:, 0], edge_index[:, 1]
+        gt = np.zeros(len(src), dtype=bool)
+        for pid in np.unique(labels):
+            nodes = np.where(labels == pid)[0]
+            sorted_nodes = nodes[np.argsort(frames[nodes])]
+            consecutive = set(zip(sorted_nodes[:-1], sorted_nodes[1:]))
+            for k, (s, t) in enumerate(zip(src, tgt)):
+                if (s, t) in consecutive:
+                    gt[k] = True
+        return gt
+
+    def __call__(
+        self,
+        df: pd.DataFrame,
+        target_column: Optional[str] = None,
+        split_tracks: bool = True,
+    ) -> list[Data]:
+        """Build position-node graphs from a TracksDataFrame."""
+        graph_dataset = []
+
+        if target_column is not None:
+            df = df.copy()
+            df["target"] = pd.Categorical(df[target_column]).codes
+
+        for current_video in df["set"].unique():
+            df_video = df[df["set"] == current_video].sort_values("frame").reset_index(drop=True)
+
+            positions = df_video[["x", "y"]].to_numpy(dtype=np.float32)
+            node_labels = df_video["label"].to_numpy()
+            frames = df_video["frame"].to_numpy()
+
+            if split_tracks:
+                edge_index, edge_attr = self.get_connectivity(positions, frames, node_labels)
+            else:
+                edge_index, edge_attr = self.get_connectivity(positions, frames)
+
+            edge_gt = self.get_gt_connectivity(node_labels, edge_index, frames)
+
+            graph_label = int(df_video["target"].iloc[0]) if target_column is not None else []
+
+            n_edges = len(edge_index)
+            edge_index_t = (
+                torch.tensor(edge_index.T, dtype=torch.long)
+                if n_edges > 0
+                else torch.zeros((2, 0), dtype=torch.long)
+            )
+            y = (
+                torch.tensor(edge_gt[:, None], dtype=torch.float)
+                if n_edges > 0
+                else torch.zeros((0, 1), dtype=torch.float)
+            )
+            edge_attr_t = (
+                torch.tensor(edge_attr, dtype=torch.float)
+                if n_edges > 0
+                else torch.zeros((0, 3), dtype=torch.float)
+            )
+
+            graph = Data(
+                x=torch.tensor(positions, dtype=torch.float),
+                edge_index=edge_index_t,
+                edge_attr=edge_attr_t,
+                frames=torch.tensor(frames, dtype=torch.float),
+                y=y,
+                graph_label=torch.tensor(graph_label, dtype=torch.int64),
+            )
+
+            if split_tracks:
+                graph_dataset += get_subgraphs(graph)
             else:
                 graph_dataset.append(graph)
 

@@ -34,7 +34,7 @@ from trajan.visualization import (
     save_classification_report,
 )
 from trajan.data import TracksDataFrame
-from trajan.graph import GraphFromTrajectories
+from trajan.graph import VelocityGraphFromTrajectories
 
 
 def _repo_root() -> Path:
@@ -168,7 +168,7 @@ def main():
             save_classification_report(report_df, split_dir / "classification_report.csv")
 
         train_data, val_data = data.split_train_test_manual(split["val_tracks"])
-        graph_builder = GraphFromTrajectories.from_tracks(
+        graph_builder, _ = VelocityGraphFromTrajectories.from_tracks(
             train_data, cfg["graph"]["max_frame_gap"]
         )
 

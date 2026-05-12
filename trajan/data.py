@@ -1,3 +1,4 @@
+import io
 import pathlib
 import warnings
 import xml.etree.ElementTree as ET
@@ -147,15 +148,16 @@ class TracksDataFrame(pd.DataFrame):
     split_train_test(test_size, seed)
         Splits the data into train and test sets, stratified by particle
         type and video.
-    compute_displacements()
-        Computes per-step displacement magnitudes across all trajectories,
-        handling gaps in frame continuity.
+    compute_increments()
+        Computes per-step increment magnitudes across all trajectories,
+        handling gaps in frame continuity. Returns velocity magnitudes
+        if frame_rate is set, otherwise raw displacement magnitudes.
 
     Examples
     --------
     >>> df = TracksDataFrame(raw_df, frame_rate=30)
     >>> train, test = df.split_train_test(test_size=0.2, seed=42)
-    >>> displacements = train.compute_displacements()
+    >>> increments = train.compute_increments()
     """
 
     _metadata = ["frame_rate"]
@@ -295,33 +297,42 @@ class TracksDataFrame(pd.DataFrame):
 
         return train_data, val_data
 
-    def compute_displacements(self) -> np.ndarray:
-        """Compute per-step displacement magnitudes across all trajectories.
+    def compute_increments(self) -> np.ndarray:
+        """Compute per-step increment magnitudes across all trajectories.
 
         Handles gaps in frame continuity by splitting trajectories at
-        missing frames before computing displacements, so step sizes are
-        never computed across discontinuities.
+        missing frames. If ``frame_rate`` is set, magnitudes are divided
+        by the inter-frame time to give speed magnitudes (spatial units /
+        second); otherwise raw displacement magnitudes are returned.
 
         Returns
         -------
         np.ndarray
-            1D array of displacement magnitudes, one per consecutive
-            detection pair across all trajectories and videos.
+            1D array of increment magnitudes, one per consecutive detection
+            pair across all trajectories and videos.
         """
-        displacements = []
+        increments = []
 
         for video in self["set"].unique():
             video_data = self[self["set"] == video]
             for particle in video_data["label"].unique():
-                particle_selection = video_data[video_data["label"] == particle]
-                frame_gaps = np.where(np.diff(particle_selection["frame"]) > 1)[0]
-                coords = particle_selection[["x", "y"]].to_numpy()
-                for section in np.split(coords, frame_gaps + 1):
-                    step_displacement = np.linalg.norm(np.diff(section, axis=0), axis=1)
-                    displacements.append(step_displacement)
+                p = video_data[video_data["label"] == particle].sort_values("frame")
+                frames_arr = p["frame"].to_numpy()
+                coords = p[["x", "y"]].to_numpy()
+                gaps = np.where(np.diff(frames_arr) > 1)[0]
+                frame_sections = np.split(frames_arr, gaps + 1)
+                coord_sections = np.split(coords, gaps + 1)
+                for frames_sec, coords_sec in zip(frame_sections, coord_sections):
+                    if len(coords_sec) < 2:
+                        continue
+                    diffs = np.diff(coords_sec, axis=0)
+                    magnitudes = np.linalg.norm(diffs, axis=1)
+                    if self.frame_rate is not None:
+                        dt_seconds = np.diff(frames_sec) / self.frame_rate
+                        magnitudes = magnitudes / dt_seconds
+                    increments.append(magnitudes)
 
-        displacements = np.concatenate(displacements)
-        return displacements
+        return np.concatenate(increments) if increments else np.array([], dtype=np.float64)
 
     def compute_features(self) -> pd.DataFrame:
         """Compute hand-crafted trajectory features for all particles.
@@ -342,6 +353,123 @@ class TracksDataFrame(pd.DataFrame):
                     features["type"] = track["type"].iloc[0]
                 rows.append(features)
         return pd.DataFrame(rows)
+
+    # ------------------------------------------------------------------
+    # Serialisation — npz (default) and HDF5 (optional, requires h5py)
+    # ------------------------------------------------------------------
+
+    def save_npz(self, path: Union[str, pathlib.Path], crops: Optional[np.ndarray] = None) -> None:
+        """Save tracks and (optionally) crops to a single ``.npz`` file.
+
+        Parameters
+        ----------
+        path : str or Path
+            Destination file. The ``.npz`` extension is added if absent.
+        crops : np.ndarray, optional
+            Crop array of shape ``(N, C, H, W)`` or ``(N, H, W)``.
+            Omit if this dataset has no associated crops.
+
+        Examples
+        --------
+        >>> df.save_npz("data/cytoplasmic/dataset.npz", crops=crops_array)
+        >>> df.save_npz("data/cytoplasmic/tracks_only.npz")
+        """
+        buf = io.StringIO()
+        self.to_csv(buf, index=False)
+        csv_bytes = np.frombuffer(buf.getvalue().encode(), dtype=np.uint8)
+
+        arrays: dict = {"tracks_csv": csv_bytes}
+        if self.frame_rate is not None:
+            arrays["frame_rate"] = np.array([self.frame_rate])
+        if crops is not None:
+            arrays["crops"] = crops
+
+        np.savez_compressed(path, **arrays)
+
+    @classmethod
+    def load_npz(cls, path: Union[str, pathlib.Path]) -> Tuple["TracksDataFrame", Optional[np.ndarray]]:
+        """Load tracks and crops from a ``.npz`` file saved by :meth:`save_npz`.
+
+        Parameters
+        ----------
+        path : str or Path
+            Path to the ``.npz`` file.
+
+        Returns
+        -------
+        tracks : TracksDataFrame
+        crops : np.ndarray or None
+            ``None`` when the file contains no crops.
+
+        Examples
+        --------
+        >>> tracks, crops = TracksDataFrame.load_npz("data/cytoplasmic/dataset.npz")
+        """
+        data = np.load(path, allow_pickle=False)
+        csv_str = data["tracks_csv"].tobytes().decode()
+        frame_rate = float(data["frame_rate"][0]) if "frame_rate" in data else None
+        crops = data["crops"] if "crops" in data else None
+        df = cls(pd.read_csv(io.StringIO(csv_str)), frame_rate=frame_rate)
+        return df, crops
+
+    def save_hdf5(self, path: Union[str, pathlib.Path], crops: Optional[np.ndarray] = None) -> None:
+        """Save tracks and (optionally) crops to a single HDF5 file.
+
+        Requires ``h5py``.  The tracks are stored under the key ``"tracks"``
+        using pandas' built-in HDF5 support; crops are stored as a dataset
+        under ``"crops"``.  Frame rate is stored as a root-level attribute.
+
+        Parameters
+        ----------
+        path : str or Path
+            Destination ``.h5`` file.
+        crops : np.ndarray, optional
+            Crop array of shape ``(N, C, H, W)`` or ``(N, H, W)``.
+
+        Examples
+        --------
+        >>> df.save_hdf5("data/cytoplasmic/dataset.h5", crops=crops_array)
+        """
+        import h5py  # optional dependency
+
+        path = pathlib.Path(path)
+        pd.DataFrame(self).to_hdf(path, key="tracks", mode="w")
+
+        with h5py.File(path, "a") as f:
+            if self.frame_rate is not None:
+                f.attrs["frame_rate"] = self.frame_rate
+            if crops is not None:
+                f.create_dataset("crops", data=crops, compression="gzip")
+
+    @classmethod
+    def load_hdf5(cls, path: Union[str, pathlib.Path]) -> Tuple["TracksDataFrame", Optional[np.ndarray]]:
+        """Load tracks and crops from an HDF5 file saved by :meth:`save_hdf5`.
+
+        Requires ``h5py``.
+
+        Parameters
+        ----------
+        path : str or Path
+            Path to the ``.h5`` file.
+
+        Returns
+        -------
+        tracks : TracksDataFrame
+        crops : np.ndarray or None
+            ``None`` when the file contains no crops dataset.
+
+        Examples
+        --------
+        >>> tracks, crops = TracksDataFrame.load_hdf5("data/cytoplasmic/dataset.h5")
+        """
+        import h5py  # optional dependency
+
+        df = pd.read_hdf(path, key="tracks")
+        with h5py.File(path, "r") as f:
+            frame_rate = float(f.attrs["frame_rate"]) if "frame_rate" in f.attrs else None
+            crops = f["crops"][:] if "crops" in f else None
+
+        return cls(df, frame_rate=frame_rate), crops
 
 
 def to_tracks_dataframe(
