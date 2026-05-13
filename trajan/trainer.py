@@ -18,9 +18,10 @@ from torchvision.transforms import Compose
 
 from trajan.custom_models.magik import MagikMPM, ImageGraphConv
 from trajan.data import TracksDataFrame
-from trajan.dataset import VelocityGraphDataset, PositionGraphDataset
+from trajan.dataset import VelocityGraphDataset, PositionGraphDataset, _normalize_imgs
 from trajan.graph import VelocityGraphFromTrajectories, PositionGraphFromTrajectories
 from trajan.transforms import RandomFlip, RandomRotation
+from trajan.visualization import plot_confusion_matrix, plot_classification_report, save_classification_report
 
 
 def _collate_video(batch):
@@ -28,42 +29,28 @@ def _collate_video(batch):
     return Batch.from_data_list(list(graphs)), torch.cat(imgs_list, dim=0)
 
 
-class VideoGraphClassifier(L.LightningModule):
-    """LightningModule wrapping ImageGraphConv for (graph, imgs) batches."""
-
-    def __init__(self, model, lr=1e-4, wd=1e-5, num_classes=3):
-        super().__init__()
-        self.model = model
-        self.loss_fn = nn.CrossEntropyLoss()
-        self.lr = lr
-        self.wd = wd
-        self.num_classes = num_classes
-        self._val_losses: list = []
+class VideoGraphClassifier(dl.CategoricalClassifier):
+    """CategoricalClassifier adapted for (graph, imgs) batches."""
 
     def forward(self, graph, imgs):
         return self.model(graph, imgs)
 
-    def _step(self, batch, stage):
+    def training_step(self, batch, batch_idx):
         graph, imgs = batch
+        self._current_batch_size = graph.num_graphs
         y_hat = self(graph, imgs)
-        loss = self.loss_fn(y_hat, graph.y)
-        self.log(f"{stage}_loss", loss, batch_size=graph.num_graphs, prog_bar=True)
-        if stage == "val":
-            self._val_losses.append(loss.detach())
+        loss = self.compute_loss(y_hat, graph.y)
+        self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
+        self.log_metrics("train", y_hat, graph.y, on_step=True, on_epoch=True, prog_bar=True, logger=True)
         return loss
 
-    def training_step(self, batch, batch_idx):
-        return self._step(batch, "train")
-
     def validation_step(self, batch, batch_idx):
-        self._step(batch, "val")
-
-    def configure_optimizers(self):
-        return torch.optim.Adam(self.parameters(), lr=self.lr, weight_decay=self.wd)
-
-    @property
-    def best_val_loss(self):
-        return float(torch.stack(self._val_losses).mean()) if self._val_losses else float("inf")
+        graph, imgs = batch
+        self._current_batch_size = graph.num_graphs
+        y_hat = self(graph, imgs)
+        loss = self.compute_loss(y_hat, graph.y)
+        self.log("val_loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
+        self.log_metrics("val", y_hat, graph.y, on_step=True, on_epoch=True, prog_bar=True, logger=True)
 
 
 def check_val_coverage(dataset, num_classes: int, display_labels: list) -> None:
@@ -85,7 +72,10 @@ def print_split_summary(train_data, val_data) -> None:
     classes = train_desc["particle_types"]
 
     col_w = max(len(c) for c in classes) + 2
-    header = f"  {'Class':<{col_w}}  {'Train recs':>10}  {'Train tracks':>12}  {'Val recs':>9}  {'Val tracks':>10}"
+    header = (
+        f"  {'Class':<{col_w}}  {'Train recs':>10}  {'Train tracks':>12}"
+        f"  {'Avg len':>7}  {'Val recs':>9}  {'Val tracks':>10}  {'Avg len':>7}"
+    )
     print("\nTrain / Val split:")
     print(header)
     print("  " + "-" * (len(header) - 2))
@@ -94,8 +84,9 @@ def print_split_summary(train_data, val_data) -> None:
         va = val_desc.get(cls, {})
         print(
             f"  {cls:<{col_w}}  {tr.get('n_recordings', 0):>10}  "
-            f"{tr.get('n_tracks', 0):>12}  {va.get('n_recordings', 0):>9}  "
-            f"{va.get('n_tracks', 0):>10}"
+            f"{tr.get('n_tracks', 0):>12}  {tr.get('avg_track_len', 0):>7.1f}"
+            f"  {va.get('n_recordings', 0):>9}  "
+            f"{va.get('n_tracks', 0):>10}  {va.get('avg_track_len', 0):>7.1f}"
         )
     print()
 
@@ -107,6 +98,74 @@ def build_run_name(cfg: dict) -> str:
 
 def build_run_id() -> str:
     return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+def evaluate_full_trajectories(model, val_dataset, display_labels, training_mode, run_dir):
+    """Run inference on complete validation trajectories without subgraph sampling.
+
+    Each trajectory in ``val_dataset.graph_dataset`` is processed in full and
+    passed through the model as a single-graph batch. Results are written to
+    ``run_dir`` as CSV files and a confusion-matrix heatmap.
+
+    Parameters
+    ----------
+    model : dl.CategoricalClassifier
+        Trained model.
+    val_dataset : _GraphDatasetBase
+        Validation dataset (provides ``graph_dataset``, ``_process_subgraph``,
+        and optionally ``crops``).
+    display_labels : list[str]
+        Class names in label order.
+    training_mode : str
+        ``"video"`` or ``"graph"``.
+    run_dir : Path
+        Directory where result files are saved.
+    """
+    model.eval()
+    truth, preds = [], []
+
+    with torch.no_grad():
+        for graph in val_dataset.graph_dataset:
+            processed = val_dataset._process_subgraph(graph.clone())
+            batch = Batch.from_data_list([processed])
+
+            if training_mode == "video":
+                imgs = val_dataset.crops[graph.crop_idx]
+                imgs = _normalize_imgs(imgs)
+                y_hat = model(batch, imgs)
+            else:
+                y_hat = model(batch)
+
+            preds.append(torch.argmax(y_hat, dim=1).item())
+            truth.append(graph.graph_label.item())
+
+    truth = np.array(truth)
+    preds = np.array(preds)
+
+    report = classification_report(truth, preds, target_names=display_labels, output_dict=True)
+    report_df = pd.DataFrame(report).T.round(2)
+
+    cm = confusion_matrix(truth, preds)
+    cm_df = pd.DataFrame(cm, index=display_labels, columns=display_labels)
+
+    val_dir = run_dir / "val"
+    val_dir.mkdir(exist_ok=True)
+
+    save_classification_report(report_df, val_dir / "full_traj_report.csv")
+    cm_df.to_csv(val_dir / "full_traj_confusion_matrix.csv")
+
+    fig = plot_confusion_matrix(cm_df, display_labels)
+    fig.savefig(val_dir / "full_traj_confusion_matrix.png")
+    plt.close(fig)
+
+    fig = plot_classification_report(report_df)
+    fig.savefig(val_dir / "full_traj_report.png")
+    plt.close(fig)
+
+    print("\nFull-trajectory validation:")
+    print(report_df.to_string())
+
+    return report_df, cm_df
 
 
 def evaluate(model, val_loader, display_labels, mode="graph"):
@@ -315,9 +374,12 @@ def run(cfg: dict, trial=None):
     encoder_dimension = cfg["model"]["encoder_dimension"]
     num_blocks = cfg["model"]["num_blocks"]
 
+    _lr = float(cfg["training"]["lr"])
+    _wd = float(cfg["training"]["weight_decay"])
+
     if training_mode == "video":
         cnn_cfg = cfg["model"].get("cnn", {})
-        image_graph_conv = ImageGraphConv(
+        inner_model = ImageGraphConv(
             [encoder_dimension] * num_blocks,
             out_features=num_classes,
             out_activation=nn.Softmax(dim=1),
@@ -325,22 +387,22 @@ def run(cfg: dict, trial=None):
             kernel_size=cnn_cfg.get("kernel_size", 3),
             fusion=cnn_cfg.get("fusion", "add"),
         )
-        image_graph_conv.head.configure(in_features=encoder_dimension + num_extra_features, out_features=num_classes)
-        image_graph_conv = image_graph_conv.create()
-
+        inner_model.head.configure(in_features=encoder_dimension + num_extra_features, out_features=num_classes)
+        inner_model = inner_model.create()
+        loss_fn = nn.CrossEntropyLoss()
         model = VideoGraphClassifier(
-            image_graph_conv,
-            lr=float(cfg["training"]["lr"]),
-            wd=float(cfg["training"]["weight_decay"]),
+            model=inner_model,
+            optimizer=dl.Adam(lr=_lr, weight_decay=_wd),
+            loss=loss_fn,
             num_classes=num_classes,
-        )
+        ).build()
     else:
-        magik = MagikMPM(
+        inner_model = MagikMPM(
             [encoder_dimension] * num_blocks,
             out_features=num_classes,
             out_activation=nn.Softmax(dim=1),
         )
-        magik.head.configure(in_features=encoder_dimension + num_extra_features, out_features=num_classes)
+        inner_model.head.configure(in_features=encoder_dimension + num_extra_features, out_features=num_classes)
 
         if cfg["training"].get("weighted_loss", False):
             labels_arr = np.array([g.graph_label.item() for g in train_graphs])
@@ -351,38 +413,33 @@ def run(cfg: dict, trial=None):
             loss_fn = nn.CrossEntropyLoss()
 
         model = dl.CategoricalClassifier(
-            model=magik,
-            optimizer=dl.Adam(
-                lr=float(cfg["training"]["lr"]),
-                weight_decay=float(cfg["training"]["weight_decay"]),
-            ),
+            model=inner_model,
+            optimizer=dl.Adam(lr=_lr, weight_decay=_wd),
             loss=loss_fn,
             num_classes=num_classes,
         ).build()
 
-        if "scheduler" in cfg["training"]:
-            import types
-            _lr = float(cfg["training"]["lr"])
-            _wd = float(cfg["training"]["weight_decay"])
-            _warmup_epochs = int(cfg["training"]["scheduler"].get("warmup_epochs", 5))
-            _start_factor = float(cfg["training"]["scheduler"].get("start_factor", 0.1))
-            _eta_min = float(cfg["training"]["scheduler"].get("eta_min", 0))
-            _num_epochs = int(cfg["training"]["num_epochs"])
+    if "scheduler" in cfg["training"]:
+        import types
+        _warmup_epochs = int(cfg["training"]["scheduler"].get("warmup_epochs", 5))
+        _start_factor = float(cfg["training"]["scheduler"].get("start_factor", 0.1))
+        _eta_min = float(cfg["training"]["scheduler"].get("eta_min", 0))
+        _num_epochs = int(cfg["training"]["num_epochs"])
 
-            def _configure_optimizers(self):
-                optimizer = torch.optim.Adam(self.parameters(), lr=_lr, weight_decay=_wd)
-                warmup = torch.optim.lr_scheduler.LinearLR(
-                    optimizer, start_factor=_start_factor, end_factor=1.0, total_iters=_warmup_epochs
-                )
-                cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
-                    optimizer, T_max=max(1, _num_epochs - _warmup_epochs), eta_min=_eta_min
-                )
-                scheduler = torch.optim.lr_scheduler.SequentialLR(
-                    optimizer, schedulers=[warmup, cosine], milestones=[_warmup_epochs]
-                )
-                return [optimizer], [{"scheduler": scheduler, "interval": "epoch"}]
+        def _configure_optimizers(self):
+            optimizer = torch.optim.Adam(self.parameters(), lr=_lr, weight_decay=_wd)
+            warmup = torch.optim.lr_scheduler.LinearLR(
+                optimizer, start_factor=_start_factor, end_factor=1.0, total_iters=_warmup_epochs
+            )
+            cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, T_max=max(1, _num_epochs - _warmup_epochs), eta_min=_eta_min
+            )
+            scheduler = torch.optim.lr_scheduler.SequentialLR(
+                optimizer, schedulers=[warmup, cosine], milestones=[_warmup_epochs]
+            )
+            return [optimizer], [{"scheduler": scheduler, "interval": "epoch"}]
 
-            model.configure_optimizers = types.MethodType(_configure_optimizers, model)
+        model.configure_optimizers = types.MethodType(_configure_optimizers, model)
 
     # -------------------------------------------------------------------------
     # Callbacks and logger
@@ -403,38 +460,23 @@ def run(cfg: dict, trial=None):
     # -------------------------------------------------------------------------
     # Training
     # -------------------------------------------------------------------------
-    if training_mode == "video":
-        trainer = L.Trainer(
-            max_epochs=cfg["training"]["num_epochs"],
-            accelerator="auto",
-            callbacks=callbacks,
-            logger=logger,
-            enable_progress_bar=trial is None,
-        )
-        trainer.fit(model, train_loader, val_loader)
-        best_val_loss = checkpoint_cb.best_model_score.item() if checkpoint_cb.best_model_score is not None else float("inf")
-        if checkpoint_cb.best_model_path:
-            ckpt = torch.load(checkpoint_cb.best_model_path, map_location="cpu")
-            model.load_state_dict(ckpt["state_dict"])
-        best_model = model
-    else:
-        trainer = dl.Trainer(
-            max_epochs=cfg["training"]["num_epochs"],
-            accelerator="auto",
-            callbacks=callbacks,
-            logger=logger,
-            enable_progress_bar=trial is None,
-        )
-        trainer.fit(model, train_loader, val_loader)
+    trainer = dl.Trainer(
+        max_epochs=cfg["training"]["num_epochs"],
+        accelerator="auto",
+        callbacks=callbacks,
+        logger=logger,
+        enable_progress_bar=trial is None,
+    )
+    trainer.fit(model, train_loader, val_loader)
 
-        fig, _ = trainer.history.plot()
-        fig.savefig(run_dir / "training_curves.png")
-        plt.close(fig)
+    fig, _ = trainer.history.plot()
+    fig.savefig(run_dir / "training_curves.png")
+    plt.close(fig)
 
-        best_val_loss = checkpoint_cb.best_model_score.item() if checkpoint_cb.best_model_score is not None else float("inf")
-        if checkpoint_cb.best_model_path:
-            best_model = dl.CategoricalClassifier.load_from_checkpoint(checkpoint_cb.best_model_path)
-        else:
-            best_model = model
+    best_val_loss = checkpoint_cb.best_model_score.item() if checkpoint_cb.best_model_score is not None else float("inf")
+    model_cls = VideoGraphClassifier if training_mode == "video" else dl.CategoricalClassifier
+    best_model = model_cls.load_from_checkpoint(checkpoint_cb.best_model_path) if checkpoint_cb.best_model_path else model
+
+    evaluate_full_trajectories(best_model, val_dataset, display_labels, training_mode, run_dir)
 
     return best_val_loss, run_dir, best_model, train_loader, val_loader, display_labels

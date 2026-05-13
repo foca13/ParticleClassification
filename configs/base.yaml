@@ -1,5 +1,5 @@
 # configs/default.yaml
-seed: 42
+seed: 6
 output_dir: "runs"
 
 data:
@@ -14,17 +14,17 @@ data:
   #   postgolgi: [1, 4, 7]
 
 graph:
-  node_features: "position"             # "velocity" (vx,vy nodes) or "position" (x,y nodes)
+  node_features: "velocity"             # "velocity" (vx,vy nodes) or "position" (x,y nodes)
   max_frame_gap: 3
-  Dt_range: [50, 120]
+  Dt_range: [40, 100]
 
 model:
   encoder_dimension: 96
   num_blocks: 4
   num_classes: 3
   cnn:                                     # only used when mode: video
-    channels: [8, 16, 32]                  # output channels per conv block (depth = len(channels))
-    kernel_size: 3                         # conv kernel size for all layers
+    channels: [12, 24, 48]                  # output channels per conv block (depth = len(channels))
+    kernel_size: 5                         # conv kernel size for all layers
     fusion: "add"                          # "add" (element-wise) | "cat" (concat + projection)
 
 training:
@@ -32,10 +32,10 @@ training:
   weight_decay: 5e-4
   batch_size: 16
   val_batch_size: 256
-  num_epochs: 30
+  num_epochs: 60
   sample_balanced: true
   weighted_loss: false
-  dataset_size_multiplier: 2            # scales sampled trajectories: size = multiplier * total_frames / mean(Dt_range)
+  dataset_size_multiplier: 3            # scales sampled trajectories: size = multiplier * total_frames / mean(Dt_range)
   scheduler:                            # warmup + cosine annealing (remove comment to enable)
     warmup_epochs: 5                    # linear warmup duration (epochs)
     start_factor: 0.1                   # initial LR fraction at warmup start (ramps to 1.0)

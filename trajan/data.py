@@ -223,6 +223,27 @@ class TracksDataFrame(pd.DataFrame):
                     print(f"{key}: {value}")
         return description
 
+    def track_lengths(self) -> Dict[str, Dict[int, Dict[int, int]]]:
+        """Return the length of every trajectory, grouped by type, recording, and label.
+
+        Returns
+        -------
+        dict
+            ``{particle_type: {recording_id: {label: length}}}``
+            where *length* is the number of detections in that trajectory.
+        """
+        result: Dict[str, Dict[int, Dict[int, int]]] = {}
+        for ptype in self["type"].unique():
+            result[ptype] = {}
+            subset = self[self["type"] == ptype]
+            for rec in sorted(subset["set"].unique()):
+                rec_data = subset[subset["set"] == rec]
+                result[ptype][int(rec)] = {
+                    int(lbl): int(len(grp))
+                    for lbl, grp in rec_data.groupby("label")
+                }
+        return result
+
     def split_train_test(self, test_size: float = 0.25, seed: Optional[int] = None) -> Tuple["TracksDataFrame", "TracksDataFrame"]:
         """Split data into train and test sets by recording.
 
