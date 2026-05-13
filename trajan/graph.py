@@ -379,6 +379,18 @@ class VelocityGraphFromTrajectories:
                 else torch.zeros((2, 0), dtype=torch.long)
             )
 
+            if "crop_idx" in df_video.columns:
+                crop_lookup = dict(zip(
+                    zip(df_video["label"], df_video["frame"]),
+                    df_video["crop_idx"],
+                ))
+                crop_indices = np.array([
+                    crop_lookup.get((int(labels[i]), int(frames[i])), 0)
+                    for i in range(len(velocities))
+                ], dtype=np.int64)
+            else:
+                crop_indices = np.zeros(len(velocities), dtype=np.int64)
+
             graph = Data(
                 x=torch.tensor(velocities, dtype=torch.float),
                 edge_index=edge_index_t,
@@ -386,6 +398,7 @@ class VelocityGraphFromTrajectories:
                 frames=torch.tensor(frames, dtype=torch.float),
                 y=torch.tensor(y, dtype=torch.float),
                 graph_label=torch.tensor(graph_label, dtype=torch.int64),
+                crop_idx=torch.tensor(crop_indices, dtype=torch.long),
             )
 
             if split_tracks:
@@ -574,6 +587,11 @@ class PositionGraphFromTrajectories:
                 else torch.zeros((0, 3), dtype=torch.float)
             )
 
+            if "crop_idx" in df_video.columns:
+                crop_indices = df_video["crop_idx"].to_numpy()
+            else:
+                crop_indices = np.zeros(len(positions), dtype=np.int64)
+
             graph = Data(
                 x=torch.tensor(positions, dtype=torch.float),
                 edge_index=edge_index_t,
@@ -581,6 +599,7 @@ class PositionGraphFromTrajectories:
                 frames=torch.tensor(frames, dtype=torch.float),
                 y=y,
                 graph_label=torch.tensor(graph_label, dtype=torch.int64),
+                crop_idx=torch.tensor(crop_indices, dtype=torch.long),
             )
 
             if split_tracks:

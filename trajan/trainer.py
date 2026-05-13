@@ -18,7 +18,7 @@ from torchvision.transforms import Compose
 
 from trajan.custom_models.magik import MagikMPM, ImageGraphConv
 from trajan.data import TracksDataFrame
-from trajan.dataset import VelocityGraphDataset, PositionGraphDataset, VideoGraphDataset, build_video_graph_dataset
+from trajan.dataset import VelocityGraphDataset, PositionGraphDataset
 from trajan.graph import VelocityGraphFromTrajectories, PositionGraphFromTrajectories
 from trajan.transforms import RandomFlip, RandomRotation
 
@@ -236,12 +236,8 @@ def run(cfg: dict, trial=None):
             train_data, max_frame_gap, frame_rate=frame_rate
         )
 
-    if training_mode == "video":
-        train_graphs = build_video_graph_dataset(graph_builder, train_data, target_column="type", split_tracks=True)
-        val_graphs = build_video_graph_dataset(graph_builder, val_data, target_column="type", split_tracks=True)
-    else:
-        train_graphs = graph_builder(train_data, target_column="type", split_tracks=True)
-        val_graphs = graph_builder(val_data, target_column="type", split_tracks=True)
+    train_graphs = graph_builder(train_data, target_column="type", split_tracks=True)
+    val_graphs = graph_builder(val_data, target_column="type", split_tracks=True)
 
     # -------------------------------------------------------------------------
     # Datasets
@@ -261,42 +257,29 @@ def run(cfg: dict, trial=None):
     train_dataset_size = int(dm * sum(len(g.x) for g in train_graphs) / np.mean(Dt_range))
     val_dataset_size = 5 * int(dm * sum(len(g.x) for g in val_graphs) / np.mean(Dt_range))
 
-    if training_mode == "video":
-        video_kw = dict(
-            node_features=node_features,
-            frame_rate=frame_rate,
-        )
-        if node_features == "velocity":
-            video_kw["velocity_std"] = velocity_std
-        train_dataset = VideoGraphDataset(
-            train_graphs, crops, Dt_range, train_dataset_size,
-            transform=transform, target="global",
-            sample_balanced=cfg["training"]["sample_balanced"],
-            **video_kw,
-        )
-        val_dataset = VideoGraphDataset(
-            val_graphs, crops, Dt_range, val_dataset_size,
-            sample_balanced=False, target="global", **video_kw,
-        )
-    elif node_features == "position":
+    crops_arg = crops if training_mode == "video" else None
+
+    if node_features == "position":
         train_dataset = PositionGraphDataset(
             train_graphs, Dt_range, train_dataset_size,
             transform=transform, target="global",
             sample_balanced=cfg["training"]["sample_balanced"],
+            crops=crops_arg,
         )
         val_dataset = PositionGraphDataset(
             val_graphs, Dt_range, val_dataset_size,
-            target="global",
+            target="global", crops=crops_arg,
         )
     else:
         train_dataset = VelocityGraphDataset(
             train_graphs, Dt_range, train_dataset_size,
             velocity_std=velocity_std, transform=transform,
             target="global", sample_balanced=cfg["training"]["sample_balanced"],
+            crops=crops_arg,
         )
         val_dataset = VelocityGraphDataset(
             val_graphs, Dt_range, val_dataset_size,
-            velocity_std=velocity_std, target="global",
+            velocity_std=velocity_std, target="global", crops=crops_arg,
         )
 
     check_val_coverage(val_dataset, cfg["model"]["num_classes"], display_labels)
