@@ -21,7 +21,7 @@ from trajan.video_crops import build_video_crops_dataset
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--base", default="data/cytoplasmic", help="root data directory")
-    parser.add_argument("--crop_size", type=int, default=24, help="side length of each crop in pixels (default 24 → 24×24)")
+    parser.add_argument("--crop_size", type=int, default=20, help="side length of each crop in pixels (default 24 → 24×24)")
     parser.add_argument("--frame_rate", type=float, default=None, help="recording frame rate in Hz (stored in the output npz)")
     args = parser.parse_args()
 

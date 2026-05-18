@@ -25,7 +25,7 @@ def load_xml_files(dir_path: str) -> List[ET.ElementTree]:
     """
     dir_obj = pathlib.Path(dir_path)
     xml_files = []
-    for file in dir_obj.rglob("*.xml"):
+    for file in dir_obj.rglob("Tracks.xml"):
         tree = ET.parse(file)
         xml_files.append(tree)
     return xml_files

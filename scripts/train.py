@@ -22,7 +22,7 @@ if __name__ == "__main__":
     mode = cfg["data"].get("mode", "graph")
     for loader, split in [(train_loader, "train"), (val_loader, "val")]:
         split_dir = run_dir / split
-        split_dir.mkdir()
+        split_dir.mkdir(exist_ok=True)
         report_df, cm_df = evaluate(best_model, loader, display_labels, mode=mode)
         print(f"--- {split} ---")
         print(report_df.to_string())

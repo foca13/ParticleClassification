@@ -1,22 +1,22 @@
 # configs/default.yaml
-seed: 6
+seed: 36
 output_dir: "runs"
 
 data:
   path: "data/cytoplasmic/tracks.csv"
   frame_rate: 10
   test_size: 0.25
-  mode: "video"                          # "graph" (trajectories only) or "video" (trajectories + ROCS crops)
-  video_path: "data/cytoplasmic/video_crops/video_crops_24.npz"  # only used when mode: video; produced by scripts/build_video_dataset.py --crop-size 24 --frame-rate 10
-  # val_tracks:                           # manual validation split (overrides test_size/seed)
-  #   endosome: [2, 3, 10, 12]
-  #   golgi: [0, 1]
-  #   postgolgi: [1, 4, 7]
+  mode: "graph"                           # "graph" (trajectories only) or "video" (trajectories + ROCS crops)
+  video_path: "data/cytoplasmic/video_crops/video_crops_20.npz"  # only used when mode: video; produced by scripts/build_video_dataset.py --crop-size 24 --frame-rate 10
+  val_tracks:                           # manual validation split (overrides test_size/seed)
+    late_endosome: [1, 4, 6, 8, 11, 14, 17]
+    golgi: [20, 24]
+    postgolgitoendosome: [28, 29, 34, 35]
 
 graph:
   node_features: "velocity"             # "velocity" (vx,vy nodes) or "position" (x,y nodes)
   max_frame_gap: 3
-  Dt_range: [40, 100]
+  Dt_range: [40, 120]
 
 model:
   encoder_dimension: 96
@@ -24,19 +24,21 @@ model:
   num_classes: 3
   cnn:                                     # only used when mode: video
     channels: [12, 24, 48]                  # output channels per conv block (depth = len(channels))
-    kernel_size: 5                         # conv kernel size for all layers
+    kernel_size: 3                         # conv kernel size for all layers
     fusion: "add"                          # "add" (element-wise) | "cat" (concat + projection)
 
 training:
-  lr: 1e-4
-  weight_decay: 5e-4
+  lr: 1.0e-4
+  weight_decay: 5.0e-4
   batch_size: 16
   val_batch_size: 256
   num_epochs: 60
   sample_balanced: true
   weighted_loss: false
   dataset_size_multiplier: 3            # scales sampled trajectories: size = multiplier * total_frames / mean(Dt_range)
+  patience: 10                          # early stopping: epochs with no improvement before stopping
+  min_delta: 1.0e-4                     # early stopping: minimum change to count as improvement
   scheduler:                            # warmup + cosine annealing (remove comment to enable)
     warmup_epochs: 5                    # linear warmup duration (epochs)
     start_factor: 0.1                   # initial LR fraction at warmup start (ramps to 1.0)
-    eta_min: 5e-5                       # minimum LR at the end of cosine decay
+    eta_min: 5.0e-5                     # minimum LR at the end of cosine decay

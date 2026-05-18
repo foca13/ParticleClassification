@@ -9,7 +9,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import yaml
-from lightning.pytorch.callbacks import ModelCheckpoint
+from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
 from lightning.pytorch.loggers import CSVLogger
 from sklearn.metrics import classification_report, confusion_matrix
 from torch_geometric.data import Batch
@@ -451,7 +451,14 @@ def run(cfg: dict, trial=None):
         save_top_k=1,
     )
 
-    callbacks = [checkpoint_cb]
+    early_stop_cb = EarlyStopping(
+        monitor="val_loss",
+        mode="min",
+        patience=cfg["training"].get("patience", 10),
+        min_delta=cfg["training"].get("min_delta", 1e-4),
+    )
+
+    callbacks = [checkpoint_cb, early_stop_cb]
 
     if trial is not None:
         from optuna.integration import PyTorchLightningPruningCallback
@@ -472,6 +479,10 @@ def run(cfg: dict, trial=None):
     fig, _ = trainer.history.plot()
     fig.savefig(run_dir / "training_curves.png")
     plt.close(fig)
+
+    cfg["training"]["actual_epochs"] = trainer.current_epoch + 1
+    with open(run_dir / "config.yaml", "w") as f:
+        yaml.dump(cfg, f, Dumper=_InlineListDumper, default_flow_style=False, sort_keys=False)
 
     best_val_loss = checkpoint_cb.best_model_score.item() if checkpoint_cb.best_model_score is not None else float("inf")
     model_cls = VideoGraphClassifier if training_mode == "video" else dl.CategoricalClassifier

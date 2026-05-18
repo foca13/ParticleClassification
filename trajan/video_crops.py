@@ -25,13 +25,13 @@ import tifffile
 
 from trajan.data import TracksDataFrame, parse_particle_tree
 
-_SPACING = 0.036   # default µm / pixel (matches SPT viewer constant)
-_CROP_SIZE = 24    # output crop side length in pixels
+_SPACING = 0.065   # default µm / pixel (matches SPT viewer constant)
+_CROP_SIZE = 20    # output crop side length in pixels
 
 CLASS_TO_TYPE: dict[str, str] = {
-    "WAVE7mCherry_late_endosome": "endosome",
-    "WAVE18mCherry_Golgi": "Golgi",
-    "WAVE27mCherry_Postgolgitoendosome": "Postgolgitoendosome",
+    "WAVE7mCherry_late_endosome": "late_endosome",
+    "WAVE18mCherry_Golgi": "golgi",
+    "WAVE27mCherry_Postgolgitoendosome": "postgolgitoendosome",
 }
 
 
@@ -46,12 +46,14 @@ def _get_tif_meta(tif: tifffile.TiffFile) -> tuple[int, int, float]:
         spacing = float(tif.imagej_metadata.get("spacing", _SPACING))
 
     series = tif.series[0] if tif.series else None
-    if series is not None:
+    if series is not None and "T" in series.axes:
         axes = series.axes
         shape = series.shape
-        n_frames = shape[axes.index("T")] if "T" in axes else 1
+        n_frames = shape[axes.index("T")]
         n_channels = shape[axes.index("C")] if "C" in axes else 1
     else:
+        # No explicit time axis — treat each page as one frame, single channel.
+        # tifffile sometimes misreports T-only stacks as CYX.
         n_frames = len(tif.pages)
         n_channels = 1
 
@@ -70,30 +72,15 @@ def _load_rocs_frame(tif: tifffile.TiffFile, frame_idx: int, n_frames: int, n_ch
 
 
 def _find_tif(recording_dir: pathlib.Path) -> Optional[pathlib.Path]:
-    """Return the best candidate TIF for crop extraction.
-
-    Priority:
-      1. ROCS.tif  (single-channel ROCS, exact match)
-      2. Any *.tif whose name starts with "ROCS"
-      3. First *.tif alphabetically
-    """
+    """Return ROCS.tif if present, otherwise None."""
     rocs = recording_dir / "ROCS.tif"
-    if rocs.exists():
-        return rocs
-    tifs = sorted(recording_dir.glob("*.tif"))
-    for tif in tifs:
-        if tif.name.upper().startswith("ROCS"):
-            return tif
-    return tifs[0] if tifs else None
+    return rocs if rocs.exists() else None
 
 
 def _find_xml(recording_dir: pathlib.Path) -> Optional[pathlib.Path]:
-    """Return Tracks.xml if present, otherwise the first .xml file found."""
+    """Return Tracks.xml if present, otherwise None."""
     tracks = recording_dir / "Tracks.xml"
-    if tracks.exists():
-        return tracks
-    xmls = sorted(recording_dir.glob("*.xml"))
-    return xmls[0] if xmls else None
+    return tracks if tracks.exists() else None
 
 
 def _find_recording_dirs(class_dir: pathlib.Path) -> list[pathlib.Path]:
@@ -222,7 +209,7 @@ def build_video_crops_dataset(
 
             if not particles:
                 if verbose:
-                    print(f"  {str(rel):<50s}  set={set_id:3d}  particles=   0  dets=    0")
+                    print(f"  {str(rel):<50s}  set={set_id:3d}  particles= 0  detections= 0")
                 set_id += 1
                 continue
 
@@ -276,7 +263,7 @@ def build_video_crops_dataset(
                 skip_str = f"  ({n_skipped} skipped)" if n_skipped else ""
                 print(
                     f"  {str(rel):<50s}  set={set_id:3d}  "
-                    f"particles={len(particles):4d}  dets={n_dets:5d}{skip_str}"
+                    f"particles={len(particles):4d}  detections={n_dets:5d}{skip_str}"
                 )
             set_id += 1
 

@@ -1,0 +1,27 @@
+seed: 6
+output_dir: "runs/cnn"
+
+data:
+  video_path: "data/cytoplasmic/video_crops/video_crops_20.npz"
+  frame_rate: 10
+  test_size: 0.25
+  mode: "crop"           # "crop" (one detection per sample) or "trajectory" (one track per sample)
+  min_length: 5          # only used in trajectory mode
+  val_tracks:                           # manual validation split (overrides test_size/seed)
+    late_endosome: [1, 4, 6, 8, 11, 14, 17]
+    golgi: [20, 24]
+    postgolgitoendosome: [28, 29, 34, 35]
+
+model:
+  channels: [16, 32]   # conv block output channels (one block per entry)
+  embed_dim: 128            # per-trajectory embedding dimension after temporal pooling
+  dropout: 0.3
+
+training:
+  lr: 1.0e-3
+  weight_decay: 1.0e-4
+  batch_size: 32
+  num_epochs: 50
+  weighted_loss: true
+  patience: 10
+  min_delta: 1.0e-4
